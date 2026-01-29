@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.VSCodeCounter/
+logs/
+logs_save/
+output/
+output_save/
+.vscode/
