@@ -2,9 +2,9 @@
 
 <!-- Copyright (c) 2026 The Pangu Project Authors. All rights reserved. -->
 
-Source code for the paper: **"Pangu: Semantic-Enhanced Logic Decoupling for Broken Access Control Detection in Embedded Systems"**
+Source code for the paper: **"Pangu: Semantic-Aware Logic Decoupling for Broken Access Control Detection in Embedded Systems"**
 
-PANGU is a static analysis framework leveraging semantic-enhanced logic decoupling to detect BAC vulnerabilities.
+PANGU is a static analysis framework leveraging semantic-aware logic decoupling to detect BAC vulnerabilities.
 
 ---
 
@@ -19,7 +19,7 @@ PANGU is a static analysis framework leveraging semantic-enhanced logic decoupli
 ### Installation
 
 ```bash
-git clone https://github.com/anonymous/pangu.git
+git clone https://github.com/tiger5671/PANGU.git
 cd pangu
 pip install -r requirements.txt
 
@@ -147,6 +147,12 @@ PANGU/
 ```
 
 ---
+
+## Ethical Considerations
+
+As detailed in our paper, PANGU has successfully uncovered 34 previously unknown BAC vulnerabilities in commercial IoT firmware.  **Controlled Release Strategy:** To balance open science transparency with the ethical obligation to protect real-world systems from unintended misuse, we have adopted a controlled release strategy for data containing sensitive technical details. Firmware samples, PoC exploits, and specific vulnerable configurations associated with unpatched issues are temporarily withheld in accordance with Coordinated Vulnerability Disclosure (CVD) practices. These artifacts will be fully released to this repository only after the respective vendors have completed their remediation processes.
+
+------
 
 ## License
 
