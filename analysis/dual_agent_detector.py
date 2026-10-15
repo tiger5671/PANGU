@@ -35,13 +35,16 @@ class DualAgentDetector:
     5. Output final report
     """
     
-    def __init__(self, ida_host: str = "localhost", ida_port: int = 18811):
+    def __init__(self, ida_host: str = "127.0.0.1", ida_port: int = 4455,
+                 ida_client=None, llm=None, knowledge_base=None, storage_graph=None):
         """Initialize dual-agent system"""
         # IDA Pro connection
-        self.ida = IDAProClient(ida_host, ida_port)
+        self.ida = ida_client if ida_client is not None else IDAProClient(ida_host, ida_port)
         
         # LLM Provider
-        self.llm = LLMProvider()
+        self.llm = llm if llm is not None else LLMProvider()
+        self.knowledge_base = knowledge_base
+        self.storage_graph, self.current_binary_id = storage_graph, ""
         
         # ACDG
         self.acdg: Optional[ACDG] = None
@@ -79,9 +82,12 @@ class DualAgentDetector:
         print("\n[*] Checking IDA Pro connection...")
         
         try:
+            if not self.ida.connect():
+                return False
             status = self.ida.get_status()
             if status.get("status") == "ok":
                 data = status.get("data", {})
+                self.current_binary_id = data.get("binary_id", "")
                 print(f"    Binary: {data.get('binary_name', 'Unknown')}")
                 print(f"    Functions: {data.get('function_count', 'Unknown')}")
                 return True
@@ -115,25 +121,33 @@ class DualAgentDetector:
         
         if not self.check_ida_connection():
             raise ConnectionError("IDA Pro connection failed")
+        if self.acdg.binary_id and self.acdg.binary_id != self.current_binary_id:
+            raise ValueError("ACDG binary identity differs from the current IDA database")
         
         # 1. Initialize Agents
         print("\n[Phase 1] Initializing Agents...")
-        self.detective = DetectiveAgent(self.ida, self.llm, self.acdg)
-        self.reviewer = ReviewerAgent(self.ida, self.llm, self.acdg)
+        self.detective = DetectiveAgent(self.ida, self.llm, self.acdg, self.knowledge_base, self.storage_graph, self.current_binary_id)
+        self.reviewer = ReviewerAgent(self.ida, self.llm, self.acdg, self.knowledge_base, self.storage_graph, self.current_binary_id)
+        self.detective.verbose = self.reviewer.verbose = self.verbose
         
         # 2. Detective quick triage (optional)
-        target_routes = self.acdg.get_auth_free_routes()
-        
-        if self.enable_quick_triage and len(target_routes) > 10:
-            print("\n[Phase 2] Quick Triage...")
-            high_risk = self.detective.quick_triage()
-            if high_risk:
-                target_routes = high_risk[:self.max_routes_per_session]
-                print(f"    Focusing on {len(target_routes)} high-risk routes")
+        if self.max_routes_per_session < 0:
+            raise ValueError("Route budget must be nonnegative; 0 means all routes")
+        foreign_routes = [r for r in self.acdg.routes if r.binary_id and r.binary_id != self.current_binary_id]
+        eligible = [r for r in self.acdg.routes if not r.binary_id or r.binary_id == self.current_binary_id]
+        ranked = (self.detective.prioritized_routes(eligible) if self.enable_quick_triage else eligible)
+        target_routes = ranked[:self.max_routes_per_session] if self.max_routes_per_session else ranked
+        deferred = ranked[len(target_routes):]
         
         # 3. Detective deep investigation
         print("\n[Phase 3] Detective Investigation...")
         self.detective.findings = []  # Reset
+        audited = set()
+        for mechanism in self.acdg.global_auth_mechanisms if eligible or not self.acdg.routes else []:
+            target = mechanism.address or mechanism.name
+            if target and target not in audited:
+                audited.add(target)
+                self.detective.findings.extend(self.detective.investigate_gatekeeper(mechanism.name, target))
         
         for idx, route in enumerate(target_routes):
             if self.verbose:
@@ -161,18 +175,43 @@ class DualAgentDetector:
             analysis_timestamp=start_time.isoformat(),
             total_routes=len(self.acdg.routes),
             auth_free_routes=len(self.acdg.get_auth_free_routes()),
-            auth_required_routes=len([r for r in self.acdg.routes if r.auth_state.value == "auth_required"]),
+            auth_required_routes=sum(r.auth_state.value == "Auth-Required" for r in self.acdg.routes),
             findings=verified_findings,
             duration_seconds=duration
         )
         
+        report.unresolved_findings = self.reviewer.unresolved_findings
+        report.coverage = {
+            "route_budget": self.max_routes_per_session,
+            "binary_id": self.current_binary_id,
+            "storage_graph_enabled": self.storage_graph is not None,
+            "eligible_routes": len(ranked), "attempted_routes": len(target_routes),
+            "auth_states_attempted": {state: sum(r.auth_state.value == state for r in target_routes)
+                                      for state in ("Auth-Free", "Auth-Required", "Unknown")},
+            "deferred_routes": [{"path": r.path, "handler": r.handler, "auth_state": r.auth_state.value,
+                                 "reason": "Route budget exhausted"} for r in deferred] +
+                               [{"path": r.path, "handler": r.handler, "auth_state": r.auth_state.value,
+                                 "reason": "Route binary identity differs from current database"} for r in foreign_routes],
+            "gatekeepers_audited": sorted(audited),
+            "investigation_outcomes": self.detective.diagnostics,
+            "review_rejected": self.reviewer.rejected_count,
+            "review_unresolved": len(self.reviewer.unresolved_findings),
+            "evidence_queries": self.detective.evidence.query_count + self.reviewer.evidence.query_count,
+            "evidence_cache_hits": self.detective.evidence.cache_hits + self.reviewer.evidence.cache_hits,
+            "triage_query_budget": self.detective.triage_evidence.max_records,
+            "triage_queries": self.detective.triage_evidence.query_count,
+            "investigation_query_budget": self.detective.evidence.max_records,
+            "review_query_budget": self.reviewer.evidence.max_records,
+            "detective_step_budget": self.detective.max_steps,
+            "review_step_budget": self.reviewer.max_steps,
+        }
         # Save report
         os.makedirs(output_dir, exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = os.path.join(output_dir, f"{self.acdg.firmware_name}_vulnerability_report_{timestamp}.json")
         
-        self.reviewer.export_report(report_path)
+        report.save_json(report_path)
         
         # Print summary
         self._print_summary(report)
@@ -301,7 +340,7 @@ def main():
     parser.add_argument("acdg", help="Path to ACDG JSON file")
     parser.add_argument("-o", "--output", default="output", help="Output directory")
     parser.add_argument("--host", default="localhost", help="IDA Pro host")
-    parser.add_argument("--port", type=int, default=18811, help="IDA Pro port")
+    parser.add_argument("--port", type=int, default=4455, help="IDA Pro port")
     parser.add_argument("--no-triage", action="store_true", help="Disable quick triage")
     parser.add_argument("--max-routes", type=int, default=50, help="Max routes to analyze")
     parser.add_argument("--interactive", "-i", help="Interactive mode for single route")

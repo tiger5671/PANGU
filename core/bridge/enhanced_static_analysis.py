@@ -21,6 +21,7 @@ try:
     import ida_funcs
     import ida_name
     import ida_xref
+    import ida_ida
     IN_IDA = True
 except ImportError:
     IN_IDA = False
@@ -56,12 +57,8 @@ class EnhancedTableScanner:
             raise RuntimeError("This module must run inside IDA Pro")
         
         # Architecture detection - IDA 9.0 compatible
-        try:
-            info = idaapi.get_inf_structure()
-            self.is_64bit = info.is_64bit()
-        except AttributeError:
-            # IDA 9.0 new API
-            self.is_64bit = idaapi.inf_is_64bit()
+        self.is_64bit = ida_ida.inf_is_64bit()
+        self.arm_thumb = ida_ida.inf_get_procname().lower().startswith("arm") and not self.is_64bit
         
         self.ptr_size = 8 if self.is_64bit else 4
         
@@ -132,7 +129,7 @@ class EnhancedTableScanner:
             return False, None
         
         # ARM Thumb bit handling
-        target = ptr & ~1
+        target = ptr & ~1 if self.arm_thumb else ptr
         
         # Check if it's a function
         if ida_funcs.get_func(target):

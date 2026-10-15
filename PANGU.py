@@ -168,7 +168,7 @@ def _merge_static_routes(static_routes: List, existing_paths: set, verbose: bool
             continue
         
         # Check if already exists
-        if path.lower() in existing_paths:
+        if path in existing_paths:
             continue
         
         # Calculate route priority
@@ -214,14 +214,16 @@ def _merge_static_routes(static_routes: List, existing_paths: set, verbose: bool
             handler="",  # Static analysis cannot determine handler
             source_hub=sr.source_file if hasattr(sr, 'source_file') else "",
             source_type="static_analysis",
+            http_method=sr.method,
             root="/",
-            auth_state=auth_state,
-            protection_type=protection_type,
+            auth_state=AuthState.UNKNOWN,
+            protection_type=ProtectionType.NONE,
+            analysis_gaps=["Filesystem endpoint and authentication hints require binary verification"],
             protection_detail=f"From static analysis: {auth_hint}" if auth_hint else "From filesystem analysis"
         )
         
         merged_routes.append(route)
-        existing_paths.add(sr.path.lower())
+        existing_paths.add(sr.path)
     
     if verbose and merged_routes:
         # Show first few merged routes
@@ -697,9 +699,9 @@ def run_phase1(ida: IDAProClient, llm: LLMProvider,
         # Deduplication set for existing routes
         existing_paths = set()
         for route in routes:
-            existing_paths.add(route.path.lower())
+            existing_paths.add(route.path)
             if route.sub_path:
-                existing_paths.add(route.sub_path.lower())
+                existing_paths.add(route.sub_path)
         
         # Merge static routes from pre-analysis result
         static_routes = _merge_static_routes(preanalysis.static_routes, existing_paths, verbose)
@@ -708,46 +710,19 @@ def run_phase1(ida: IDAProClient, llm: LLMProvider,
         
         print(f"  [+] Merged {static_route_count} static routes from filesystem analysis")
     
-    # ========== Adjust Auth State Based on Phase 0 Whitelist ==========
-    # For Apache + mod_auth_zyxel and similar architectures, auth is handled at server level
-    # Internal CGI auth detection may be inaccurate, need to reference Apache config whitelist
-    whitelist_adjusted = 0
+    # An HTTP-server whitelist cannot erase a CGI/handler-local check.
     if preanalysis and preanalysis.auth_findings:
-        # Extract whitelist paths
-        whitelist_paths = []
-        for finding in preanalysis.auth_findings:
-            if "Auth-Free (whitelist):" in finding:
-                path = finding.replace("Auth-Free (whitelist):", "").strip()
-                whitelist_paths.append(path)
-        
-        if whitelist_paths:
-            print(f"\n[Phase 1.3] Adjusting auth states based on Apache whitelist ({len(whitelist_paths)} entries)...")
-            
-            for route in routes:
-                # Check if route is in whitelist
-                route_path = route.path.split('?')[0]  # Remove query parameters
-                cgi_name = route_path.split('/')[-1]   # Extract CGI filename
-                
-                is_whitelisted = False
-                for wl_path in whitelist_paths:
-                    # Match /cgi-bin/xxx.cgi or directly xxx.cgi
-                    if cgi_name in wl_path or route_path == wl_path or route_path.endswith(wl_path):
-                        is_whitelisted = True
-                        break
-                
-                if is_whitelisted and route.auth_state == AuthState.AUTH_REQUIRED:
-                    # Override to Auth-Free
-                    route.auth_state = AuthState.AUTH_FREE
-                    route.protection_type = ProtectionType.NONE
-                    old_detail = route.protection_detail or ""
-                    route.protection_detail = f"[WHITELIST OVERRIDE] Apache config allows unauthenticated access. (Original: {old_detail})"
-                    whitelist_adjusted += 1
-                    if verbose:
-                        print(f"    [!] {route.path}: Auth-Required -> Auth-Free (in Apache whitelist)")
-            
-            if whitelist_adjusted > 0:
-                print(f"  [+] Adjusted {whitelist_adjusted} routes from Auth-Required to Auth-Free based on Apache whitelist")
-    
+        whitelist_paths = [item.replace("Auth-Free (whitelist):", "").strip()
+                           for item in preanalysis.auth_findings if "Auth-Free (whitelist):" in item]
+        for route in routes:
+            if route.path.split("?", 1)[0] in whitelist_paths:
+                route.analysis_gaps.append("HTTP server whitelist observed; handler-local authentication requires separate verification")
+    status = ida.get_status()
+    binary_id = status.get("data", {}).get("binary_id", "") if status.get("status") == "ok" else ""
+    for route in routes:
+        if route.handler and not route.binary_id:
+            route.binary_id = binary_id
+
     # Save merged result
     routes_data = [r.to_dict() for r in routes]
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -909,7 +884,8 @@ def run_phase3(ida: IDAProClient, llm: LLMProvider,
                firmware_name: str, output_dir: str,
                acdg: ACDG = None,
                verbose: bool = True,
-               knowledge_base: KnowledgeBase = None) -> Tuple[List[VulnerabilityFinding], float]:
+               knowledge_base: KnowledgeBase = None,
+               max_routes: int = 50, storage_graph=None) -> Tuple[List[VulnerabilityFinding], float]:
     """
     Phase 3: Dual-Agent Vulnerability Detection
     
@@ -948,91 +924,21 @@ def run_phase3(ida: IDAProClient, llm: LLMProvider,
             acdg = ACDG.load_json(acdg_file)
             print(f"  Loaded ACDG: {acdg.total_routes} routes")
         else:
-            print(f"[ERROR] ACDG file not found: {acdg_file}")
-            print("        Please run Phase 2 first or provide ACDG.")
-            return [], 0
-    
-    from analysis.detective_agent import DetectiveAgent
-    from analysis.reviewer_agent import ReviewerAgent
-    
-    findings = []
-    
-    # Phase 3.1: Detective - Gatekeeper Audit
-    print("\n[Phase 3.1] Gatekeeper Security Audit...")
-    detective = DetectiveAgent(ida, llm, acdg, knowledge_base=knowledge_base)
-    detective.verbose = verbose
-    detective.max_steps = 8
-    
-    for mech in acdg.global_auth_mechanisms[:3]:  # Limit quantity
-        print(f"\n  Auditing Gatekeeper: {mech.name}")
-        # Try to decompile using address
-        addr = mech.address if mech.address else mech.name
-        gk_findings = detective.investigate_gatekeeper(addr)
-        findings.extend(gk_findings)
-    
-    # Phase 3.2: Detective - Quick Triage
-    print("\n[Phase 3.2] Quick Triage - High Risk Route Identification...")
-    high_risk = detective.quick_triage()
-    print(f"  High-risk routes identified: {len(high_risk)}")
-    
-    # Phase 3.3: Detective - Auth-Free Route Investigation
-    print("\n[Phase 3.3] Auth-Free Route Investigation...")
-    auth_free = acdg.get_auth_free_routes()
-    
-    # Prioritize high-risk Auth-Free routes
-    priority_routes = [r for r in auth_free if hasattr(r, 'has_sensitive_sink') and r.has_sensitive_sink]
-    if not priority_routes:
-        priority_routes = auth_free[:5]  # Default to first 5
-    
-    for idx, route in enumerate(priority_routes[:5]):
-        print(f"\n  [{idx+1}/{min(5, len(priority_routes))}] Investigating: {route.path}")
-        finding = detective.investigate_route(route)
-        if finding:
-            findings.append(finding)
-    
-    # Phase 3.4: Reviewer Verification
-    print("\n[Phase 3.4] Reviewer Counterfactual Verification...")
-    if findings:
-        reviewer = ReviewerAgent(ida, llm, acdg, knowledge_base=knowledge_base)
-        reviewer.verbose = verbose
-        
-        verified_findings = []
-        for finding in findings:
-            verified = reviewer.review_finding(finding)
-            if verified:
-                verified_findings.append(verified)
-        
-        findings = verified_findings
-        print(f"  Verified findings: {len(findings)}")
-    
+            raise FileNotFoundError(f"ACDG file not found: {acdg_file}; run Phase 2 first")
+
+    from analysis.dual_agent_detector import DualAgentDetector
+    detector = DualAgentDetector(ida_client=ida, llm=llm, knowledge_base=knowledge_base, storage_graph=storage_graph)
+    detector.verbose = verbose
+    detector.max_routes_per_session = max_routes
+    detector.set_acdg(acdg)
+    report = detector.run(output_dir)
     elapsed = time.time() - start_time
-    
-    # Statistics
-    print(f"\n[Phase 3 Complete]")
-    print(f"  Gatekeepers Audited: {len(acdg.global_auth_mechanisms[:3])}")
-    print(f"  High-Risk Routes: {len(high_risk)}")
-    print(f"  Routes Investigated: {len(priority_routes[:5])}")
-    print(f"  Vulnerabilities Found: {len(findings)}")
-    print(f"  [*] Elapsed Time: {elapsed:.2f} seconds")
-    
-    # Categorize by severity
-    if findings:
-        print("\n  Findings by Type:")
-        type_count = {}
-        for f in findings:
-            t = f.vuln_type
-            type_count[t] = type_count.get(t, 0) + 1
-        for t, c in type_count.items():
-            print(f"    - {t}: {c}")
-    
-    # Save results
+    os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f"{firmware_name}_vulnerabilities.json")
-    vuln_data = [f.to_dict() for f in findings]
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(vuln_data, f, indent=2, ensure_ascii=False)
-    print(f"  [*] Saved to: {output_file}")
-    
-    return findings, elapsed
+    with open(output_file, "w", encoding="utf-8") as stream:
+        json.dump([f.to_dict() for f in report.findings], stream, indent=2, ensure_ascii=False)
+    report.save_json(os.path.join(output_dir, f"{firmware_name}_detection_report.json"))
+    return report.findings, elapsed
 
 
 # ==================== Main ====================
@@ -1086,6 +992,9 @@ Supported Architectures:
                         help='Web initialization function name (for gatekeeper discovery)')
     parser.add_argument('--output', '-o', default='output',
                         help='Output directory')
+    parser.add_argument('--review-mailbox', help='File-based human/agent review directory; no model API required')
+    parser.add_argument('--storage-graph', help='Candidate cross-binary storage channels for this firmware')
+    parser.add_argument('--ida-snapshot', help='Replay a read-only IDA snapshot; missing queries remain unresolved')
     parser.add_argument('--ida-port', type=int, default=4455,
                         help='IDA Pro server port')
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -1095,7 +1004,17 @@ Supported Architectures:
     parser.add_argument('--rag-dir', default='rag',
                         help='Directory containing RAG knowledge base files')
     
+    parser.add_argument('--max-routes', type=int, default=50,
+                        help='Phase 3 route budget (0 = all); deferred routes remain in report')
     args = parser.parse_args()
+    if args.max_routes < 0:
+        parser.error('--max-routes must be nonnegative')
+    storage_graph = None
+    if args.storage_graph:
+        from analysis.storage_graph import StorageGraph
+        storage_graph = StorageGraph.load(args.storage_graph)
+        if storage_graph.firmware_id != args.firmware:
+            parser.error('--storage-graph firmware_id must match --firmware')
     
     # Banner
     print(BANNER)
@@ -1130,7 +1049,11 @@ Supported Architectures:
     # Connect to IDA (Required for Phase 1/2/3/all)
     print("\n" + "-" * 70)
     print("Connecting to IDA Pro...")
-    ida = IDAProClient(port=args.ida_port)
+    if args.ida_snapshot:
+        from core.bridge.snapshot_client import SnapshotIDAClient
+        ida = SnapshotIDAClient(args.ida_snapshot)
+    else:
+        ida = IDAProClient(port=args.ida_port)
     if not ida.connect():
         print("[ERROR] Failed to connect to IDA Pro!")
         print("        Please ensure IDA is running with ida_server.py loaded.")
@@ -1145,12 +1068,25 @@ Supported Architectures:
     
     # Connect to LLM
     print("\nInitializing LLM...")
-    llm = LLMProvider()
-    test_resp = llm.chat([{"role": "user", "content": "Reply OK"}])
+    if args.review_mailbox:
+        from core.review_mailbox import ReviewMailboxProvider
+        llm = ReviewMailboxProvider(args.review_mailbox)
+    else:
+        llm = LLMProvider()
+    try:
+        llm.validate_configuration()
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        ida.close()
+        return 1
+    test_resp = ({"status": "ok"} if args.review_mailbox else
+                 llm.chat([{"role": "user", "content": 'Return JSON {"status": "ok"}.'}], json_mode=True))
     if test_resp:
         print("  LLM connection: OK")
     else:
-        print("  LLM connection: WARNING - may be unstable")
+        print("[ERROR] LLM structured-response preflight failed; analysis was not started")
+        ida.close()
+        return 1
     
     # Load RAG knowledge base (if enabled)
     knowledge_base = None
@@ -1221,7 +1157,7 @@ Supported Architectures:
     
     if args.phase in ['3', 'all']:
         findings, t3 = run_phase3(ida, llm, args.firmware, args.output, acdg, 
-                                   args.verbose, knowledge_base)
+                                   args.verbose, knowledge_base, args.max_routes, storage_graph)
         phase_times['Phase 3 (Vulnerability Detection)'] = t3
     
     total_elapsed = time.time() - total_start
@@ -1265,8 +1201,16 @@ Supported Architectures:
     print("=" * 70 + "\n")
     
     # Return status code
-    return 0 if (routes or acdg or findings) else 1
+    ida.close()
+    return 0 if phase_times else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from core.review_mailbox import ReviewPending
+    try:
+        sys.exit(main())
+    except ReviewPending as pending:
+        print(f"\n[REVIEW PENDING] Read: {pending.request_path}")
+        print(f"Write {{\"request_id\": \"...\", \"response\": ...}} to: {pending.response_path}")
+        print("Then rerun the same command. Matching reviewed responses will be replayed.")
+        sys.exit(2)

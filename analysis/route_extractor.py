@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import re
+from collections import Counter
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Set
 
@@ -16,6 +17,7 @@ sys.path.append(os.getcwd())
 from core.bridge.ida_client import IDAProClient
 from core.llm import LLMProvider
 from analysis.models import RouteNode, AuthState
+from analysis.route_hierarchy import reconstruct_routes, MountResolver
 
 
 class RouteExtractor:
@@ -293,6 +295,13 @@ class RouteExtractor:
         return "UNKNOWN", "/", True
     
     def filter_tables_with_llm(self, tables: List[Dict]) -> Dict[str, Dict]:
+        """Classify every table in bounded batches; 30 is a batch size, not a cap."""
+        whitelist = {}
+        for offset in range(0, len(tables), 30):
+            whitelist.update(self._filter_table_batch(tables[offset:offset + 30]))
+        return whitelist
+
+    def _filter_table_batch(self, tables: List[Dict]) -> Dict[str, Dict]:
         """
         Use LLM for table classification and filtering
         """
@@ -357,16 +366,23 @@ OUTPUT FORMAT (JSON):
             if isinstance(response, str):
                 response = json.loads(response)
             
-            decisions = response.get("decisions", [])
+            if not isinstance(response, dict) or not isinstance(response.get("decisions"), list):
+                raise ValueError("Malformed table classification")
+            decisions = response["decisions"]
+            submitted = {candidate["id"] for candidate in candidates}
+            counts = Counter(d.get("id") for d in decisions if isinstance(d, dict) and isinstance(d.get("id"), str))
             
             whitelist = {}
             for d in decisions:
-                if d.get("verdict") == "KEEP":
+                if (not isinstance(d, dict) or not isinstance(d.get("id"), str)
+                        or d["id"] not in submitted or counts[d["id"]] != 1):
+                    continue
+                if d.get("verdict") == "KEEP" and d.get("class") in ("STANDARD_PATH", "URL_PATH", "ACTION_MAP"):
                     whitelist[d["id"]] = {
                         "class": d.get("class", "UNKNOWN"),
                         "parent_hint": d.get("parent_hint", "/")
                     }
-                    self.log(f"    [KEEP] {d['id']} -> {d.get('class')} (root: {d.get('parent_hint')})")
+                    self.log(f"    [KEEP] {d['id']} -> {d.get('class')}")
                 else:
                     self.log(f"    [DROP] {d['id']}")
             
@@ -389,14 +405,15 @@ OUTPUT FORMAT (JSON):
                 }
         return whitelist
     
-    def extract_from_static_tables(self) -> List[RouteNode]:
+    def extract_from_static_tables(self, use_llm_filter=True) -> List[RouteNode]:
         """
         Extract routes from static tables
         """
         self.log("\n[Phase 3] Extracting Routes from Static Tables...")
         
         # LLM classification filtering
-        self._table_whitelist = self.filter_tables_with_llm(self.static_tables)
+        self._table_whitelist = (self.filter_tables_with_llm(self.static_tables) if use_llm_filter
+                                 else self._fallback_classification(self.static_tables))
         
         routes = []
         
@@ -427,17 +444,17 @@ OUTPUT FORMAT (JSON):
                     # Build full path
                     if url.startswith('/'):
                         full_path = url
-                    elif root_hint != '/':
-                        full_path = f"{root_hint}/{url}"
                     else:
-                        full_path = f"/{url}"
+                        full_path = url
                     
                     route = RouteNode(
                         path=full_path,
                         sub_path=url,
                         handler=handler,
                         source_hub=addr,
-                        source_type="static_table"
+                        source_type="static_table",
+                        selector={"kind": "action", "value": url} if not url.startswith("/") else {},
+                        analysis_gaps=["Mount context unresolved", f"Suggested prefix {root_hint!r} is not registration evidence"]
                     )
                     routes.append(route)
             
@@ -455,14 +472,16 @@ OUTPUT FORMAT (JSON):
                         if not handler_addr:
                             continue
                         
-                        full_path = f"{root_hint}/{key}" if root_hint != '/' else f"/{key}"
+                        full_path = key
                         
                         route = RouteNode(
-                            path=f"{full_path}#{idx}",  # Distinguish different operations on same resource
+                            path=full_path,
                             sub_path=key,
                             handler=handler_addr,
                             source_hub=addr,
-                            source_type="mixed_table"
+                            source_type="mixed_table",
+                            selector={"operation_index": idx, "kind": "unresolved_operation"},
+                            analysis_gaps=["Operation/mount context unresolved"]
                         )
                         routes.append(route)
         
@@ -607,15 +626,15 @@ OUTPUT FORMAT (JSON):
                     # Skip ASP embedded functions (they are not independent routes, but function calls embedded in .asp files)
                     if handler_lower.startswith('asp') or url.lower().startswith('asp'):
                         continue
-                    # GoForm style route, add /goform/ prefix
-                    url = f"/goform/{url}"
                 
                 route = RouteNode(
                     path=url,
                     sub_path=url.split('/')[-1] if '/' in url else url,
                     handler=handler,
                     source_hub=hub['address'],
-                    source_type="registration_hub"
+                    source_type="registration_hub",
+                    selector={"kind": "action", "value": url} if not url.startswith("/") else {},
+                    analysis_gaps=["Mount context unresolved"]
                 )
                 routes.append(route)
         
@@ -630,7 +649,10 @@ OUTPUT FORMAT (JSON):
         unique = []
         
         for route in routes:
-            key = (route.path.lower(), route.handler.lower())
+            # HTTP paths and action selectors can be case-sensitive. Distinct
+            # methods, binaries, and mounting contexts must also survive.
+            key = (route.binary_id, route.path, route.handler, route.http_method,
+                   json.dumps(route.selector, sort_keys=True), json.dumps(route.mount_chain, sort_keys=True))
             if key not in seen:
                 seen.add(key)
                 unique.append(route)
@@ -655,7 +677,7 @@ OUTPUT FORMAT (JSON):
         all_routes = []
         
         # 2. Extract from static tables
-        static_routes = self.extract_from_static_tables()
+        static_routes = self.extract_from_static_tables(use_llm_filter)
         all_routes.extend(static_routes)
         
         # 3. Extract from registration hubs
@@ -664,6 +686,8 @@ OUTPUT FORMAT (JSON):
         
         # 4. Deduplicate
         self.routes = self.deduplicate_routes(all_routes)
+        if use_llm_filter:
+            self.routes = reconstruct_routes(self.routes, MountResolver(self.ida, self.llm))
         
         self.log(f"\n[Summary]")
         self.log(f"  Total Routes: {len(self.routes)}")
@@ -691,7 +715,7 @@ OUTPUT FORMAT (JSON):
         all_routes = []
         
         # 2. Extract from static tables
-        static_routes = self.extract_from_static_tables()
+        static_routes = self.extract_from_static_tables(use_llm_filter)
         all_routes.extend(static_routes)
         
         # 3. Extract from registration hubs (if any)
@@ -715,6 +739,8 @@ OUTPUT FORMAT (JSON):
             # Re-deduplicate
             self.routes = self.deduplicate_routes(all_routes)
         
+        if use_llm_filter:
+            self.routes = reconstruct_routes(self.routes, MountResolver(self.ida, self.llm))
         self.log(f"\n[Summary]")
         self.log(f"  Total Routes: {len(self.routes)}")
         self.log(f"  From Static Tables: {len(static_routes)}")
@@ -765,7 +791,7 @@ OUTPUT FORMAT (JSON):
             self.log("  [!] No pseudocode retrieved")
             return []
         
-        self.log(f"  [+] Retrieved pseudocode ({len(code)} chars)"))
+        self.log(f"  [+] Retrieved pseudocode ({len(code)} chars)")
         
         # Use LLM to extract route registration patterns
         prompt = f"""Analyze this decompiled C code from a router firmware's route registration/dispatch function.
@@ -802,10 +828,13 @@ Only output the JSON array, no explanation."""
             routes = []
             if isinstance(response, list):
                 for item in response:
+                    if not isinstance(item, dict):
+                        continue
                     route_name = item.get("route", "")
                     handler = item.get("handler", "")
                     
-                    if route_name:
+                    if (isinstance(route_name, str) and route_name and isinstance(handler, str) and handler
+                            and json.dumps(route_name) in code and handler in code):
                         full_path = f"{root_path}/{route_name}" if not route_name.startswith("/") else route_name
                         
                         route = RouteNode(
@@ -813,7 +842,9 @@ Only output the JSON array, no explanation."""
                             sub_path=route_name,
                             handler=handler,
                             source_hub=func_addr,
-                            source_type="dispatch_function"
+                            source_type="dispatch_function",
+                            selector={"kind": "action", "value": route_name},
+                            analysis_gaps=["Caller-supplied root prefix requires registration verification"]
                         )
                         routes.append(route)
             
@@ -905,14 +936,7 @@ Only output the JSON array, no explanation."""
             items = []
         
         for item in items:
-            route = RouteNode(
-                path=item.get('full_path', item.get('path', '')),
-                sub_path=item.get('sub_path', ''),
-                handler=item.get('handler', ''),
-                source_hub=item.get('source_hub', ''),
-                source_type=item.get('source_type', 'loaded'),
-                root=item.get('root', '/')
-            )
+            route = RouteNode.from_dict(item)
             routes.append(route)
         
         self.routes = routes
@@ -926,7 +950,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="PANGU Route Extractor")
     parser.add_argument("--host", default="localhost", help="IDA Pro host")
-    parser.add_argument("--port", type=int, default=18811, help="IDA Pro port")
+    parser.add_argument("--port", type=int, default=4455, help="IDA Pro port")
     parser.add_argument("--output", "-o", help="Output file path")
     parser.add_argument("--load", "-l", help="Load routes from existing file instead of scanning")
     

@@ -6,3 +6,8 @@ logs_save/
 output/
 output_save/
 .vscode/
+/doc/
+/firmware/
+/.runtime/
+/tmp/
+.pytest_cache/

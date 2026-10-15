@@ -74,7 +74,7 @@ class CGISubRoute:
     cgi_name: str                       # Owning CGI file
     cgi_path: str                       # CGI URL path
     dispatch_param: str = "page"        # Dispatch parameter name (page, action, cmd, etc.)
-    is_auth_protected: bool = True      # Whether protected by login authentication
+    is_auth_protected: Optional[bool] = None  # None preserves unresolved coverage
     has_csrf_protection: bool = False   # Whether has CSRF protection
     auth_detail: str = ""               # Authentication details
     
@@ -85,16 +85,19 @@ class CGISubRoute:
     
     def to_route_node(self) -> RouteNode:
         """Convert to standard RouteNode - For Phase 2 use"""
-        if self.is_auth_protected:
+        if self.is_auth_protected is True:
             auth_state = AuthState.AUTH_REQUIRED
             protection = ProtectionType.GATEKEEPER
-        else:
+        elif self.is_auth_protected is False:
             auth_state = AuthState.AUTH_FREE
+            protection = ProtectionType.NONE
+        else:
+            auth_state = AuthState.UNKNOWN
             protection = ProtectionType.NONE
         
         # Build protection detail
         protection_detail = self.auth_detail
-        if self.has_csrf_protection and not self.is_auth_protected:
+        if self.has_csrf_protection and self.is_auth_protected is False:
             protection_detail = f"CSRF-only protection (no login required). {self.auth_detail}"
         
         return RouteNode(
@@ -103,6 +106,7 @@ class CGISubRoute:
             handler=self.handler,
             source_hub=self.handler_addr,
             source_type="cgi_dispatch",
+            selector={"kind": "query", "field": self.dispatch_param, "value": self.page_name},
             root=self.cgi_path,
             auth_state=auth_state,
             protection_type=protection,
@@ -561,7 +565,8 @@ class DistributedCGIExtractor:
             handler_name, handler_addr = self._find_handler_for_page(main_code, page_name)
             
             # Determine if protected by auth (based on CGI-level auth pattern)
-            is_protected = cgi_info.auth_pattern == CGIAuthPattern.GLOBAL_CHECK
+            is_protected = (True if cgi_info.auth_pattern == CGIAuthPattern.GLOBAL_CHECK else
+                            False if cgi_info.auth_pattern in (CGIAuthPattern.NO_AUTH, CGIAuthPattern.CSRF_ONLY) else None)
             has_csrf = cgi_info.has_csrf_check
             
             sub_route = CGISubRoute(

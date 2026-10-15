@@ -9,6 +9,7 @@ import idautils
 import ida_funcs
 import ida_gdl
 import ida_bytes
+from core.graph_analysis import ControlFlowGraph
 
 try:
     import ida_hexrays
@@ -63,56 +64,8 @@ class CFGAnalyzer:
         if not blocks:
             return {}
         
-        # Build block index
-        block_map = {b.start_ea: b for b in blocks}
-        entry_ea = func.start_ea
-        
-        # Use IDA's built-in dominator calculation (if available)
-        # Otherwise use simplified dominance algorithm
-        dominators = {}
-        
-        # Initialize: entry block dominates itself
-        dominators[entry_ea] = entry_ea
-        
-        # Iteratively compute dominance relations
-        changed = True
-        all_blocks = set(b.start_ea for b in blocks)
-        
-        while changed:
-            changed = False
-            for block in blocks:
-                if block.start_ea == entry_ea:
-                    continue
-                
-                preds = [p.start_ea for p in block.preds()]
-                if not preds:
-                    continue
-                
-                # New dominator set = intersection of all predecessors' dominator sets + self
-                new_dom = None
-                for pred_ea in preds:
-                    if pred_ea in dominators:
-                        pred_dom = CFGAnalyzer._get_all_dominators(pred_ea, dominators)
-                        if new_dom is None:
-                            new_dom = pred_dom.copy()
-                        else:
-                            new_dom &= pred_dom
-                
-                if new_dom is not None:
-                    new_dom.add(block.start_ea)
-                    # Find immediate dominator (nearest dominator)
-                    idom = CFGAnalyzer._find_immediate_dominator(block.start_ea, new_dom, dominators)
-                    
-                    if idom and dominators.get(block.start_ea) != idom:
-                        dominators[block.start_ea] = idom
-                        changed = True
-        
-        # Convert to hex format output
-        result = {}
-        for block_ea, idom_ea in dominators.items():
-            result[hex(block_ea)] = hex(idom_ea)
-        
-        return result
+        return ControlFlowGraph(CFGAnalyzer.get_basic_blocks(func_addr),
+                                hex(func.start_ea)).immediate_dominators()
     
     @staticmethod
     def _get_all_dominators(block_ea, dom_map):
@@ -202,6 +155,8 @@ class TISCalculator:
             cfunc = ida_hexrays.decompile(func_addr)
             if not cfunc:
                 return []
+            # Hex-Rays assigns stable tree item indexes when rendering.
+            cfunc.get_pseudocode()
         except:
             return []
         
@@ -209,7 +164,7 @@ class TISCalculator:
         
         class TISVisitor(ida_hexrays.ctree_visitor_t):
             def __init__(self):
-                ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_FAST)
+                ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_PARENTS)
                 self.tis_results = []
             
             def visit_insn(self, i):
@@ -223,16 +178,23 @@ class TISCalculator:
                 """Analyze single if statement"""
                 w_then = self._calc_weight(if_stmt.cif.ithen)
                 w_else = self._calc_weight(if_stmt.cif.ielse)
+                then_terminates = self._is_terminating(if_stmt.cif.ithen)
+                else_terminates = self._is_terminating(if_stmt.cif.ielse)
+                implicit_else = if_stmt.cif.ielse is None
+                # if (reject) return; business(); has a real fall-through
+                # continuation. Treating the omitted else as zero loses guards.
+                if implicit_else and then_terminates:
+                    w_else = self._fallthrough_weight(if_stmt)
                 
                 max_w = max(w_then, w_else)
                 min_w = min(w_then, w_else)
                 
                 # Check if shorter branch terminates
                 if w_then <= w_else:
-                    terminates = self._is_terminating(if_stmt.cif.ithen)
+                    terminates = then_terminates
                     short_branch = "then"
                 else:
-                    terminates = self._is_terminating(if_stmt.cif.ielse)
+                    terminates = else_terminates
                     short_branch = "else"
                 
                 # Calculate TIS
@@ -241,7 +203,7 @@ class TISCalculator:
                 
                 # Determine pattern
                 pattern = "None"
-                if tis > 2.0:
+                if tis > 5.0:
                     if short_branch == "then" and terminates:
                         pattern = "Fail-Fast"  # if (fail) return;
                     elif short_branch == "else" and terminates:
@@ -254,8 +216,24 @@ class TISCalculator:
                     "weight_else": w_else,
                     "terminates": terminates,
                     "short_branch": short_branch,
-                    "pattern": pattern
+                    "pattern": pattern,
+                    "implicit_else": implicit_else,
+                    "termination_scope": "function",
+                    "analysis_method": "ctree_continuation",
+                    "limitations": "Unresolved goto/break and indirect exits do not establish termination; cross-function request exit requires separate evidence"
                 }
+
+            def _fallthrough_weight(self, statement):
+                # Only use an evidenced enclosing sequential block. Do not
+                # guess continuations across loops or unresolved transfers.
+                for parent in reversed(self.parents):
+                    if parent.op == ida_hexrays.cit_block:
+                        instructions = list(parent.cinsn.cblock)
+                        for index, insn in enumerate(instructions):
+                            if insn.index == statement.index:
+                                return sum(self._calc_weight(s) for s in instructions[index + 1:])
+                        return 0
+                return 0
             
             def _calc_weight(self, stmt):
                 """Calculate code block weight (statement count)"""
@@ -271,26 +249,45 @@ class TISCalculator:
                 elif stmt.op == ida_hexrays.cit_if:
                     # if statement counts as 1, plus internal
                     return 1 + self._calc_weight(stmt.cif.ithen) + self._calc_weight(stmt.cif.ielse)
-                elif stmt.op in [ida_hexrays.cit_for, ida_hexrays.cit_while, ida_hexrays.cit_do]:
+                elif stmt.op == ida_hexrays.cit_for:
+                    return 3 + int(stmt.cfor.init.op != ida_hexrays.cot_empty) + int(stmt.cfor.step.op != ida_hexrays.cot_empty)
+                elif stmt.op in [ida_hexrays.cit_while, ida_hexrays.cit_do]:
                     return 3  # Loops have higher weight
                 else:
                     return 1
             
             def _is_terminating(self, stmt):
-                """Check if branch terminates (return/goto/break)"""
+                """Require all paths to leave the current function.
+
+                A goto or loop break alone is not evidence of request exit.
+                """
+                return self._termination_outcomes(stmt) == {"exit"}
+
+            def _termination_outcomes(self, stmt):
                 if stmt is None:
-                    return False
-                
-                if stmt.op in [ida_hexrays.cit_return, ida_hexrays.cit_goto, ida_hexrays.cit_break]:
-                    return True
-                
+                    return {"fallthrough"}
+                if stmt.op == ida_hexrays.cit_return:
+                    return {"exit"}
+                if stmt.op in [ida_hexrays.cit_goto, ida_hexrays.cit_break, ida_hexrays.cit_continue]:
+                    return {"unknown"}
+                if stmt.op == ida_hexrays.cit_if:
+                    return self._termination_outcomes(stmt.cif.ithen) | self._termination_outcomes(stmt.cif.ielse)
+                if stmt.op == ida_hexrays.cit_expr and stmt.cexpr.op == ida_hexrays.cot_call:
+                    call = stmt.cexpr
+                    if call.x.op == ida_hexrays.cot_obj:
+                        callee = ida_funcs.get_func(call.x.obj_ea)
+                        if callee and callee.flags & ida_funcs.FUNC_NORET:
+                            return {"exit"}
                 if stmt.op == ida_hexrays.cit_block:
-                    # Check for terminating statements in block
-                    for s in stmt.cblock:
-                        if self._is_terminating(s):
-                            return True
-                
-                return False
+                    outcomes = {"fallthrough"}
+                    for instruction in stmt.cblock:
+                        if "fallthrough" not in outcomes:
+                            break
+                        outcomes = (outcomes - {"fallthrough"}) | self._termination_outcomes(instruction)
+                    return outcomes
+                if stmt.op in [ida_hexrays.cit_for, ida_hexrays.cit_while, ida_hexrays.cit_do, ida_hexrays.cit_switch]:
+                    return {"fallthrough", "unknown"}
+                return {"fallthrough"}
         
         visitor = TISVisitor()
         visitor.apply_to(cfunc.body, None)
@@ -298,13 +295,13 @@ class TISCalculator:
         return visitor.tis_results
     
     @staticmethod
-    def find_blocking_checks(func_addr, tis_threshold=2.0):
+    def find_blocking_checks(func_addr, tis_threshold=5.0):
         """
         Find checks with blocking characteristics in function (high TIS scores)
         Returns list of checks that meet the threshold
         """
         all_checks = TISCalculator.calculate_tis(func_addr)
-        return [c for c in all_checks if c["tis"] >= tis_threshold and c["terminates"]]
+        return [c for c in all_checks if c["tis"] > tis_threshold and c["terminates"]]
 
 
 class AuthPatternDetector:
@@ -417,7 +414,7 @@ def get_dominator_context(func_addr, target_addr):
 def calculate_tis(func_addr):
     return TISCalculator.calculate_tis(func_addr)
 
-def find_blocking_checks(func_addr, threshold=2.0):
+def find_blocking_checks(func_addr, threshold=5.0):
     return TISCalculator.find_blocking_checks(func_addr, threshold)
 
 def scan_auth_patterns(func_addr):

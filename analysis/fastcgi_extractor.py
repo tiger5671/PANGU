@@ -653,7 +653,7 @@ Important:
                     handler_addr="",
                     compare_length=len(r.get("path", "")),
                     is_before_auth=is_auth_free,
-                    is_after_auth=not is_auth_free,
+                    is_after_auth=r.get("auth_state") == "Auth-Required",
                     source_location=func_addr
                 )
                 route_infos.append(info)

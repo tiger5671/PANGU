@@ -7,11 +7,7 @@ import json
 import os
 import time
 import random
-import tiktoken
-from openai import OpenAI
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from google.api_core.exceptions import ResourceExhausted
+import math
 
 # ================= Configuration =================
 
@@ -44,10 +40,11 @@ class TokenStats:
         self.total_output_tokens = 0
         self.call_count = 0
         self.call_details = []  # Record details of each call
-        try:
-            self.encoder = tiktoken.encoding_for_model("gpt-4")
-        except:
-            self.encoder = tiktoken.get_encoding("cl100k_base")
+        # Importing PANGU, running Phase 0, and offline tests must never download
+        # a tokenizer. Prefer API usage counts; optional exact local counting is
+        # initialized only when explicitly requested.
+        self.encoder = None
+        self._encoder_attempted = False
     
     def count_tokens(self, text):
         """Count the number of tokens in text"""
@@ -55,7 +52,16 @@ class TokenStats:
             text = json.dumps(text, ensure_ascii=False)
         elif not isinstance(text, str):
             text = str(text)
-        return len(self.encoder.encode(text))
+        if os.environ.get("PANGU_EXACT_TOKENS") == "1" and not self._encoder_attempted:
+            self._encoder_attempted = True
+            try:
+                import tiktoken
+                self.encoder = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                pass
+        if self.encoder is not None:
+            return len(self.encoder.encode(text))
+        return math.ceil(len(text.encode("utf-8")) / 4)
     
     def count_messages_tokens(self, messages):
         """Count the number of tokens in a message list"""
@@ -104,12 +110,7 @@ class TokenStats:
         print(f"  Total Tokens:        {s['total_tokens']:,}")
         print(f"  Avg Input/Call:      {s['avg_input_per_call']:.1f}")
         print(f"  Avg Output/Call:     {s['avg_output_per_call']:.1f}")
-        # Cost estimation (GPT-4.1 pricing)
-        cost_input = s['total_input_tokens'] * 2.00 / 1_000_000
-        cost_output = s['total_output_tokens'] * 8.00 / 1_000_000
-        print(f"  Estimated Cost:      ${cost_input + cost_output:.4f}")
-        print(f"    - Input Cost:      ${cost_input:.4f}")
-        print(f"    - Output Cost:     ${cost_output:.4f}")
+        print("  Counts use API usage when available; otherwise estimated.")
         print("=" * 60)
         return s
     
@@ -123,65 +124,93 @@ token_stats = TokenStats()
 # ===========================================
 
 class LLMProvider:
-    def __init__(self):
-        self.type = LLM_TYPE
+    def __init__(self, client=None, provider=None, model=None, max_attempts=3, timeout=60):
+        self.type = provider or os.environ.get("LLM_TYPE", "openai")
+        if self.type not in {"openai", "gemini"}:
+            raise ValueError(f"Unsupported LLM_TYPE: {self.type}")
+        if not 1 <= max_attempts <= 3 or timeout <= 0:
+            raise ValueError("Use 1-3 attempts and a positive timeout")
+        self.model_name = model or os.environ.get(
+            "GEMINI_MODEL" if self.type == "gemini" else "OPENAI_MODEL",
+            GEMINI_MODEL if self.type == "gemini" else OPENAI_MODEL)
+        self.max_attempts = max_attempts
+        self.timeout = timeout
+        self.client = client
+        self.last_usage = None
+        self.last_error = None
         self.stats = token_stats  # Reference global statistics tracker
         if self.type == "gemini":
-            genai.configure(api_key=GOOGLE_API_KEY)
+            import google.generativeai as genai
+            from google.generativeai.types import HarmCategory, HarmBlockThreshold
+            genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
             self.safety_settings = {
                 HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
             }
-            self.model = genai.GenerativeModel(GEMINI_MODEL)
-            
-        elif self.type == "openai":
-            self.client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+            self.model = genai.GenerativeModel(self.model_name)
+
+    def validate_configuration(self):
+        if self.type == "openai" and self.client is None and not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError("Set OPENAI_API_KEY, OPENAI_BASE_URL and OPENAI_MODEL before running LLM analysis")
+        if self.type == "gemini" and not os.environ.get("GOOGLE_API_KEY"):
+            raise ValueError("Set GOOGLE_API_KEY before running Gemini analysis")
 
     def chat(self, messages, json_mode=True, caller="unknown"):
         """Conversation interface with retry mechanism"""
-        max_retries = 3
-        base_delay = 5  # Base wait time in seconds
+        self.last_error = None
         
         # Count input tokens
         input_tokens = self.stats.count_messages_tokens(messages)
 
-        for attempt in range(max_retries):
+        for attempt in range(self.max_attempts):
             try:
+                self.last_usage = None
                 if self.type == "gemini":
                     result = self._chat_gemini(messages, json_mode)
                 else:
                     result = self._chat_openai(messages, json_mode)
                 
                 # Count output tokens and record
+                if json_mode and not isinstance(result, (dict, list)):
+                    raise ValueError("Expected a JSON object or array")
                 output_tokens = self.stats.count_tokens(result)
+                if self.last_usage is not None:
+                    input_tokens, output_tokens = self.last_usage
                 self.stats.record_call(input_tokens, output_tokens, caller)
                 
                 return result
             
-            except ResourceExhausted:
-                # Specifically catch Google's 429 quota error
-                wait_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"[Rate Limit] Quota exceeded. Retrying in {wait_time:.1f}s...")
-                time.sleep(wait_time)
-            
             except Exception as e:
-                # Other errors: print and retry
-                print(f"[-] LLM Error (Attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                else:
-                    return None
+                self.last_error = f"{type(e).__name__}: {e}"
+                print(f"[-] LLM Error (Attempt {attempt+1}): {type(e).__name__}")
+                # Authentication/configuration failures do not improve on retry.
+                status = getattr(e, "status_code", None)
+                if status in {400, 401, 403, 404}:
+                    break
+                if attempt < self.max_attempts - 1:
+                    time.sleep(min(8, 2 ** attempt) + random.uniform(0, 0.25))
         return None
 
     def _chat_openai(self, messages, json_mode):
+        self.validate_configuration()
+        if self.client is None:
+            from openai import OpenAI
+            # Disable SDK retries so the outer three-attempt limit is real.
+            self.client = OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY", ""),
+                base_url=os.environ.get("OPENAI_BASE_URL", OPENAI_BASE_URL),
+                timeout=self.timeout, max_retries=0)
         response = self.client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=self.model_name,
             messages=messages,
             response_format={"type": "json_object"} if json_mode else None
         )
         content = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.last_usage = (usage.prompt_tokens, usage.completion_tokens)
         return json.loads(content) if json_mode else content
 
     def _chat_gemini(self, messages, json_mode):
@@ -214,7 +243,8 @@ class LLMProvider:
         response = chat.send_message(
             last_msg,
             generation_config={"response_mime_type": "application/json"} if json_mode else None,
-            safety_settings=self.safety_settings
+            safety_settings=self.safety_settings,
+            request_options={"timeout": self.timeout}
         )
         
-        return json.loads(response.text)
+        return json.loads(response.text) if json_mode else response.text

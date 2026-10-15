@@ -9,6 +9,7 @@ import ida_bytes
 import ida_segment
 import ida_funcs
 import ida_name
+import ida_ida
 
 # ================= Configuration Parameters =================
 MIN_TABLE_SIZE = 3          # Minimum consecutive pointers (values below this are not considered tables)
@@ -21,8 +22,7 @@ def init_config():
     """Auto-detect architecture and configure parameters"""
     global PTR_SIZE, IS_64BIT
     try:
-        info = idaapi.get_inf_structure()
-        IS_64BIT = info.is_64bit()
+        IS_64BIT = ida_ida.inf_is_64bit()
         PTR_SIZE = 8 if IS_64BIT else 4
         print(f"[*] Architecture detected: {'64-bit' if IS_64BIT else '32-bit'}")
         print(f"[*] Pointer size: {PTR_SIZE} bytes")
@@ -47,10 +47,11 @@ def is_valid_code_address(ea):
         return False
     
     # For ARM architecture, clear Thumb bit
-    ea = ea & ~1
+    if ida_ida.inf_get_procname().lower().startswith("arm") and not IS_64BIT:
+        ea = ea & ~1
     
     # Check if within valid address range
-    if ea < 0x1000 or ea > 0xFFFFFFFF:
+    if ea < 0 or ea == idc.BADADDR:
         return False
     
     # Check if points to a function
@@ -66,7 +67,8 @@ def is_valid_code_address(ea):
 
 def get_function_name(ea):
     """Get function name (with address info)"""
-    ea = ea & ~1  # Clear ARM Thumb bit
+    if ida_ida.inf_get_procname().lower().startswith("arm") and not IS_64BIT:
+        ea = ea & ~1
     
     # Try to get function name
     name = idc.get_func_name(ea)

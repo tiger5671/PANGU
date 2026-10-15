@@ -2,43 +2,79 @@
 # core/bridge/ida_client.py
 import socket
 import json
+import threading
+from core.bridge.protocol import receive_json, send_json
 
 class IDAProClient:
-    def __init__(self, host='127.0.0.1', port=4455):
+    def __init__(self, host='127.0.0.1', port=4455, timeout=120, connect_timeout=5):
         self.host = host
         self.port = port
         self.sock = None
+        if timeout <= 0 or connect_timeout <= 0:
+            raise ValueError("IDA timeouts must be positive")
+        self.timeout = timeout
+        self.connect_timeout = connect_timeout
+        self._lock = threading.RLock()
+        self.last_error = None
 
     def connect(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            print(f"[+] Connected to IDA V6 at {self.host}:{self.port}")
-            return True
-        except:
-            return False
+        with self._lock:
+            if self.sock is not None:
+                return True
+            try:
+                self.sock = socket.create_connection((self.host, self.port), self.connect_timeout)
+                self.sock.settimeout(self.timeout)
+                self.last_error = None
+                print(f"[+] Connected to IDA at {self.host}:{self.port}")
+                return True
+            except OSError as exc:
+                self.close()
+                self.last_error = str(exc)
+                return False
 
     def close(self):
-        if self.sock: self.sock.close()
+        with self._lock:
+            if self.sock is not None:
+                self.sock.close()
+                self.sock = None
+
+    def __enter__(self):
+        if not self.connect():
+            raise ConnectionError(self.last_error or "Cannot connect to IDA")
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
     def _send(self, cmd, params=None):
-        if not self.sock: raise Exception("Not connected")
-        req = json.dumps({"command": cmd, "params": params or {}}).encode('utf-8')
-        try:
-            self.sock.sendall(len(req).to_bytes(4, 'big') + req)
-            
-            len_bytes = self.sock.recv(4)
-            if not len_bytes: raise Exception("Closed")
-            resp_len = int.from_bytes(len_bytes, 'big')
-            
-            data = b""
-            while len(data) < resp_len:
-                data += self.sock.recv(min(resp_len - len(data), 4096))
-            return json.loads(data.decode('utf-8'))
-        except Exception as e:
-            # Simple reconnection attempt or error reporting
-            print(f"[-] Socket Error: {e}")
-            return {"status": "error", "error": str(e)}
+        # One request/response pair owns the connection. Do not automatically
+        # replay a failed request: the server may already have executed it.
+        with self._lock:
+            if self.sock is None:
+                return {"status": "error", "error": "Not connected"}
+            try:
+                send_json(self.sock, {"command": cmd, "params": params or {}})
+                response = receive_json(self.sock, self.timeout)
+                if not isinstance(response, dict) or response.get("status") not in {"ok", "error"}:
+                    raise ValueError("Malformed IDA response")
+                return response
+            except (OSError, ValueError, ConnectionError) as exc:
+                self.last_error = str(exc)
+                self.close()
+                return {"status": "error", "error": str(exc)}
+
+    def batch(self, requests):
+        """Execute up to 32 bounded read requests in one RPC round trip."""
+        if not isinstance(requests, list) or not 1 <= len(requests) <= 32:
+            raise ValueError("batch requires 1-32 requests")
+        return self._send("batch", {"requests": requests})
+
+    def decompile_page(self, address, start_line=0, max_lines=100):
+        return self._send("decompile", {"address": address, "start_line": start_line,
+                                        "max_lines": max_lines})
+
+    def analyze_guard_coverage(self, address, target_address):
+        return self._send("analyze_guard_coverage", {"address": address, "target_address": target_address})
 
     # --- Standard Server Interface Methods ---
 
@@ -173,7 +209,7 @@ class IDAProClient:
         """
         return self._send("calculate_tis", {"address": address})
     
-    def find_blocking_checks(self, address, threshold=2.0):
+    def find_blocking_checks(self, address, threshold=5.0):
         """
         Find blocking checks in a function (conditions with high TIS scores).
         threshold: TIS threshold, default 2.0

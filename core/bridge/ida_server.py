@@ -4,6 +4,7 @@ import socket
 import json
 import threading
 import sys
+import os
 import idc
 import idautils
 import idaapi
@@ -12,6 +13,12 @@ import ida_bytes
 import ida_name
 import ida_segment
 import ida_funcs
+import ida_ida
+import ida_nalt
+import ida_ua
+import ida_idp
+from core.bridge.protocol import receive_json, send_json
+from core.graph_analysis import ControlFlowGraph
 
 # --- Import sibling modules ---
 # Since static_analysis.py is in the same folder, direct import is possible
@@ -41,6 +48,9 @@ class IDAServerAgent:
         self.sock = None
         self.running = False
         self.thread = None
+        self._clients = set()
+        self._clients_lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(8)
 
     # --- Startup and Network Layer (maintained unchanged, reusing V3 stable logic) ---
     def start(self):
@@ -68,34 +78,32 @@ class IDAServerAgent:
                     conn, addr = self.sock.accept()
                 except socket.timeout: continue
                 except OSError: break
-                self.handle_client_persistent(conn, addr)
+                if not self._slots.acquire(blocking=False):
+                    conn.close()
+                    continue
+                with self._clients_lock:
+                    self._clients.add(conn)
+                threading.Thread(target=self.handle_client_persistent, args=(conn, addr), daemon=True).start()
             except Exception as e: print(f"[-] Server loop error: {e}")
 
     def handle_client_persistent(self, conn, addr):
-        conn.settimeout(None)
+        conn.settimeout(120)
         try:
             while self.running:
-                len_bytes = conn.recv(4)
-                if not len_bytes: break
-                msg_len = int.from_bytes(len_bytes, 'big')
-                data = b""
-                while len(data) < msg_len:
-                    packet = conn.recv(min(msg_len - len(data), 4096))
-                    if not packet: break
-                    data += packet
-                if len(data) < msg_len: break
-                
                 try:
-                    request = json.loads(data.decode('utf-8'))
+                    request = receive_json(conn, timeout=600)
                     response = self.safe_dispatch(request)
-                except Exception as e:
-                    response = {"status": "error", "error": f"JSON Error: {e}"}
-                
-                resp_bytes = json.dumps(response).encode('utf-8')
-                conn.sendall(len(resp_bytes).to_bytes(4, 'big'))
-                conn.sendall(resp_bytes)
-        except Exception as e: print(f"[-] Client error: {e}")
-        finally: conn.close()
+                except (ValueError, UnicodeError) as exc:
+                    send_json(conn, {"status": "error", "error": str(exc)})
+                    break  # Invalid framing must never be reused.
+                send_json(conn, response)
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            with self._clients_lock:
+                self._clients.discard(conn)
+            conn.close()
+            self._slots.release()
 
     def safe_dispatch(self, request):
         class Context: result = None
@@ -108,7 +116,11 @@ class IDAServerAgent:
 
     # --- Core Dispatch Logic (Modular Dispatcher) ---
     def _dispatch_logic(self, request):
+        if not isinstance(request, dict) or not isinstance(request.get("params", {}), dict):
+            return {"status": "error", "error": "Expected command object and params object"}
         cmd = request.get("command")
+        if not isinstance(cmd, str):
+            return {"status": "error", "error": "Expected command string"}
         params = request.get("params", {})
         
         # Dynamically find worker_xxx methods
@@ -153,6 +165,109 @@ class IDAServerAgent:
     # 1. Basic Controls
     def worker_ping(self, params):
         return {"status": "ok", "data": "pong"}
+
+    def worker_batch(self, params):
+        requests = params.get("requests")
+        if not isinstance(requests, list) or not 1 <= len(requests) <= 32:
+            return {"status": "error", "error": "batch requires 1-32 requests"}
+        allowed = {"decompile", "get_callees", "get_xrefs", "scan_args", "get_basic_blocks",
+                   "build_dominator_tree", "get_dominator_context", "calculate_tis",
+                   "find_blocking_checks", "scan_auth_patterns", "analyze_guard_coverage"}
+        results = []
+        for request in requests:
+            if not isinstance(request, dict) or request.get("command") not in allowed:
+                results.append({"status": "error", "error": "Command not allowed in read batch"})
+            else:
+                results.append(self._dispatch_logic(request))
+        return {"status": "ok", "data": results}
+
+    def worker_get_storage_accesses(self, params):
+        """Extract constant NVRAM keys at real C-tree call sites, not string hits."""
+        specs = params.get("apis", [
+            {"name": "nvram_set", "mode": "write", "key_arg": 0, "namespace": "nvram"},
+            {"name": "nvram_get", "mode": "read", "key_arg": 0, "namespace": "nvram"},
+            {"name": "nvram_safe_get", "mode": "read", "key_arg": 0, "namespace": "nvram"}])
+        limit = int(params.get("max_callers", 256))
+        if not isinstance(specs, list) or len(specs) > 16 or not 1 <= limit <= 2048:
+            return {"status": "error", "error": "Invalid storage scan budget"}
+        targets, gaps = {}, []
+        for spec in specs:
+            if (not isinstance(spec, dict) or spec.get("mode") not in {"read", "write"}
+                    or not isinstance(spec.get("name"), str) or not isinstance(spec.get("namespace"), str)
+                    or type(spec.get("key_arg")) is not int or not 0 <= spec["key_arg"] < 16):
+                return {"status": "error", "error": "Invalid storage API specification"}
+            address = self._resolve_addr(spec["name"])
+            if address == idc.BADADDR:
+                gaps.append("Storage API unresolved: " + spec["name"])
+            else:
+                targets[address] = spec
+        callers = set()
+        for address in targets:
+            for xref in idautils.CodeRefsTo(address, 0):
+                func = ida_funcs.get_func(xref)
+                if func:
+                    callers.add(func.start_ea)
+        if len(callers) > limit:
+            gaps.append("Storage caller budget exhausted")
+        binary_md5 = ida_nalt.retrieve_input_file_md5()
+        binary_id = binary_md5.hex() if binary_md5 else ""
+        accesses = []
+
+        class StorageVisitor(ida_hexrays.ctree_visitor_t):
+            def __init__(self, function):
+                super().__init__(ida_hexrays.CV_FAST)
+                self.function = function
+
+            def visit_expr(self, expr):
+                if expr.op != ida_hexrays.cot_call or expr.x.op != ida_hexrays.cot_obj:
+                    return 0
+                spec = targets.get(expr.x.obj_ea)
+                if spec is None or len(expr.a) <= spec["key_arg"]:
+                    return 0
+                arg = expr.a[spec["key_arg"]]
+                for _ in range(4):
+                    if arg.op in (ida_hexrays.cot_cast, ida_hexrays.cot_ref):
+                        arg = arg.x
+                    else:
+                        break
+                key = None
+                if arg.op == ida_hexrays.cot_str:
+                    key = arg.string
+                elif arg.op == ida_hexrays.cot_obj:
+                    value = idc.get_strlit_contents(arg.obj_ea, -1, idc.STRTYPE_C)
+                    if value:
+                        key = value.decode("utf-8", errors="replace")
+                if not key or len(key) > 512:
+                    gaps.append("Dynamic/unresolved storage key at " + hex(expr.ea))
+                    return 0
+                accesses.append({"binary_id": binary_id, "namespace": spec["namespace"],
+                                 "key": key, "mode": spec["mode"], "api": spec["name"],
+                                 "function": idc.get_func_name(self.function),
+                                 "function_address": hex(self.function), "callsite": hex(expr.ea)})
+                return 0
+
+        for caller in sorted(callers)[:limit]:
+            try:
+                cfunc = ida_hexrays.decompile(caller)
+                if cfunc is None:
+                    raise ValueError("Decompilation unavailable")
+                StorageVisitor(caller).apply_to(cfunc.body, None)
+            except Exception:
+                gaps.append("Storage caller decompilation failed: " + hex(caller))
+        return {"status": "ok", "data": {"accesses": accesses, "gaps": list(dict.fromkeys(gaps)),
+                "binary_id": binary_id, "interpretation": "Constant-key access evidence, not taint proof"}}
+
+    def worker_analyze_guard_coverage(self, params):
+        address = self._resolve_addr(params.get("address"))
+        target = self._resolve_addr(params.get("target_address"))
+        func = ida_funcs.get_func(address)
+        if not func or target == idc.BADADDR:
+            return {"status": "error", "error": "Invalid function or target"}
+        blocks = cfg_analysis.get_basic_blocks(func.start_ea)
+        block = next((b for b in blocks if int(b["start"], 16) <= target < int(b["end"], 16)), None)
+        if block is None:
+            return {"status": "error", "error": "Target not in function CFG"}
+        return {"status": "ok", "data": ControlFlowGraph(blocks, hex(func.start_ea)).guard_coverage(block["start"])}
     
     def worker_get_status(self, params):
         """Get IDA server status information"""
@@ -166,14 +281,9 @@ class IDAServerAgent:
             seg_count = len(list(idautils.Segments()))
             
             # Architecture information - IDA 9.0 compatible
-            try:
-                info = idaapi.get_inf_structure()
-                arch = "64-bit" if info.is_64bit() else "32-bit"
-                proc = info.procname
-            except:
-                # IDA 9.0 new API
-                arch = "64-bit" if idaapi.inf_is_64bit() else "32-bit"
-                proc = idaapi.inf_get_procname()
+            arch = "64-bit" if ida_ida.inf_is_64bit() else "32-bit"
+            proc = ida_ida.inf_get_procname()
+            input_md5 = ida_nalt.retrieve_input_file_md5()
             
             return {
                 "status": "ok",
@@ -184,7 +294,9 @@ class IDAServerAgent:
                     "segment_count": seg_count,
                     "architecture": arch,
                     "processor": proc,
-                    "server_version": "V6"
+                    "server_version": "V7",
+                    "binary_id": input_md5.hex() if input_md5 else "",
+                    "capabilities": ["batch", "decompile_page", "analyze_guard_coverage"]
                 }
             }
         except Exception as e:
@@ -265,11 +377,19 @@ class IDAServerAgent:
             if not cfunc: return {"status": "error", "error": "Decompile failed"}
             
             lines = [idaapi.tag_remove(line.line) for line in cfunc.get_pseudocode()]
+            start = int(params.get("start_line", 0))
+            count = int(params.get("max_lines", len(lines)))
+            if start < 0 or count < 1:
+                return {"status": "error", "error": "Invalid decompile page bounds"}
+            selected = lines[start:start + min(count, 2000)]
             return {
                 "status": "ok", 
                 "data": {
                     "func_name": idc.get_func_name(func.start_ea),
-                    "code": "\n".join(lines)
+                    "address": hex(func.start_ea),
+                    "code": "\n".join(selected),
+                    "start_line": start, "total_lines": len(lines),
+                    "truncated": start + len(selected) < len(lines)
                 }
             }
         except Exception as e:
@@ -365,6 +485,12 @@ class IDAServerAgent:
     def stop(self):
         self.running = False
         if self.sock: self.sock.close()
+        with self._clients_lock:
+            for conn in self._clients:
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     # 7. Smart Data Parsing (String or Pointer)
     def worker_resolve_data(self, params):
@@ -589,6 +715,9 @@ class IDAServerAgent:
 
         # Iterate through all instructions in function, looking for Code References
         for head in idautils.Heads(func.start_ea, func.end_ea):
+            insn = ida_ua.insn_t()
+            if not ida_ua.decode_insn(insn, head) or not ida_idp.is_call_insn(insn):
+                continue
             for xref in idautils.CodeRefsFrom(head, 0):
                 # Exclude self recursion
                 if xref == func.start_ea: continue
@@ -1126,13 +1255,9 @@ class IDAServerAgent:
 
         class GlobalBlockingVisitor(ida_hexrays.ctree_visitor_t):
             def __init__(self, target_globals):
-                ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_FAST)
+                ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_PARENTS)
                 self.targets = target_globals
-                    self.parents = [] # Stack
-                self.parents.append(i)
-                ret = ida_hexrays.ctree_visitor_t.visit_insn(self, i)
-                self.parents.pop()
-                return ret
+                self.found_addr = None
 
             def visit_expr(self, e):
                 if self.found_addr: return 0
@@ -1140,16 +1265,18 @@ class IDAServerAgent:
                 # Check if target global variable is used
                 if e.op == ida_hexrays.cot_obj and e.obj_ea in self.targets:
                     # Found reference, check context
-                    if self.check_blocking_context():
+                    if self.check_blocking_context(e):
                         self.found_addr = e.obj_ea
                 return 0
 
-            def check_blocking_context(self):
+            def check_blocking_context(self, expression):
                 # Backtrack parent nodes to find IF
                 for p in reversed(self.parents):
                     if p.op == ida_hexrays.cit_if:
+                        if not p.cinsn.cif.expr.contains_expr(expression):
+                            continue
                         # Check if IF is blocking
-                        if self.is_term_block(p.ithen) or self.is_term_block(p.ielse):
+                        if self.is_term_block(p.cinsn.cif.ithen) or self.is_term_block(p.cinsn.cif.ielse):
                             return True
                 return False
                 
@@ -1244,7 +1371,7 @@ class IDAServerAgent:
         params: {"address": "0x...", "threshold": 2.0}
         """
         addr = self._resolve_addr(params.get("address"))
-        threshold = params.get("threshold", 2.0)
+        threshold = params.get("threshold", 5.0)
         
         if addr == idc.BADADDR:
             return {"status": "error", "error": "Invalid address"}
@@ -1445,6 +1572,7 @@ if 'server_agent' in globals():
     del globals()['server_agent']
 
 
-print("[*] Starting IDA RPC Server V6...")
-server_agent = IDAServerAgent()
-server_agent.start()
+if os.environ.get("PANGU_NO_AUTOSTART") != "1":
+    print("[*] Starting IDA RPC Server V7...")
+    server_agent = IDAServerAgent()
+    server_agent.start()

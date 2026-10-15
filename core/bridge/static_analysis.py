@@ -32,6 +32,7 @@ try:
 except:
     pass
 PTR_SIZE = 8 if IS_64 else 4
+IS_ARM_THUMB = ida_ida.inf_get_procname().lower().startswith("arm") and not IS_64
 
 # NOISE FILTER (Used mainly for Engine 3 API pruning)
 BLACKLIST = {
@@ -63,7 +64,7 @@ def log(msg):
 
 def clean_addr(ea):
     if ea is None or ea == idc.BADADDR: return idc.BADADDR
-    return ea & ~1
+    return ea & ~1 if IS_ARM_THUMB else ea
 
 def read_ptr(ea):
     if IS_64: return ida_bytes.get_qword(ea)

@@ -21,6 +21,7 @@ from core.llm import LLMProvider
 from analysis.models import (
     ACDG, RouteNode, AuthMechanism, AuthState, ProtectionType
 )
+from analysis.security_semantics import verify_security_check
 
 # Import GoAhead-specific analyzer
 try:
@@ -301,7 +302,7 @@ Output JSON only:"""
         for gk in self.gatekeepers:
             # Check exact path match
             for wl_path in gk.whitelist_paths:
-                if path == wl_path or path.endswith(wl_path):
+                if path == wl_path:
                     return True, f"Matches whitelist path: {wl_path}"
             
             # Check patterns
@@ -337,7 +338,7 @@ Output JSON only:"""
             
             # Check if path matches protection prefix
             for prefix in gk.protected_prefixes:
-                if path.startswith(prefix):
+                if prefix == "/" or path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/"):
                     return True, gk.name
         
         return False, ""
@@ -366,13 +367,17 @@ class GlobalAuthIdentifier:
         """
         print("[GlobalAuth] Starting global authentication mechanism identification...")
         
-        for hub_addr in dispatch_hubs:
-            self._analyze_hub_context(hub_addr)
+        self.identified_mechanisms = []
+        # Registration hubs are not request-time dispatch evidence. Accept
+        # explicit (function, dispatch instruction) contexts only.
+        for context in dispatch_hubs:
+            if isinstance(context, dict) and context.get("dispatch_address"):
+                self._analyze_hub_context(context["function"], context["dispatch_address"])
         
         print(f"[GlobalAuth] Identified {len(self.identified_mechanisms)} global auth mechanisms")
         return self.identified_mechanisms
     
-    def _analyze_hub_context(self, hub_addr: str):
+    def _analyze_hub_context(self, hub_addr: str, dispatch_addr=None):
         """Analyze hub dominator context"""
         print(f"[GlobalAuth] Analyzing hub context: {hub_addr}")
         
@@ -387,6 +392,13 @@ class GlobalAuthIdentifier:
             return
         
         dom_tree = dom_res.get("data", {})
+        if dispatch_addr is None:
+            return
+        context_res = self.ida.get_dominator_context(hub_addr, dispatch_addr)
+        if context_res.get("status") != "ok":
+            return
+        dominator_context = context_res.get("data", [])
+        blocks = blocks_res.get("data", [])
         
         # Step 3: Scan authentication patterns
         auth_res = self.ida.scan_auth_patterns(hub_addr)
@@ -405,24 +417,32 @@ class GlobalAuthIdentifier:
             callee = call.get("callee")
             
             # Check if on dominator path
-            if self._is_in_dominator_context(call_addr, dom_tree):
+            block = next((b for b in blocks if int(b["start"], 16) <= int(call_addr, 16) < int(b["end"], 16)), None)
+            target_block = next((b for b in blocks if int(b["start"], 16) <= int(dispatch_addr, 16) < int(b["end"], 16)), None)
+            if block and target_block and block["start"] != target_block["start"] and block["start"] in dominator_context:
                 # Further verify
-                is_auth = self._verify_auth_function(callee)
-                if is_auth:
+                semantic = verify_security_check(self.ida, self.llm, callee)
+                if semantic:
                     mechanism = AuthMechanism(
                         address=call_addr,
                         name=callee,
                         mechanism_type="function",
                         confidence=0.8,
                         description=f"Auth function called in dominator context",
-                        detection_method="dominator_analysis"
+                        detection_method="dominator_analysis",
+                        evidence=[semantic], applies_to=[str(hub_addr) + ":" + str(dispatch_addr)]
                     )
                     self.identified_mechanisms.append(mechanism)
                     print(f"[GlobalAuth] Found auth mechanism: {callee}")
         
         # Analyze high TIS blocking checks
         for check in blocking_checks:
-            if check.get("tis", 0) >= 3.0:  # High threshold
+            block = next((b for b in blocks if int(b["start"], 16) <= int(check.get("address", "0"), 16) < int(b["end"], 16)), None)
+            target_block = next((b for b in blocks if int(b["start"], 16) <= int(dispatch_addr, 16) < int(b["end"], 16)), None)
+            semantic = (verify_security_check(self.ida, self.llm, hub_addr, [check])
+                        if block and target_block and block["start"] != target_block["start"]
+                        and block["start"] in dominator_context and check.get("tis", 0) > 5.0 else None)
+            if semantic:
                 mechanism = AuthMechanism(
                     address=check.get("address"),
                     name=f"inline_check_{check.get('address')}",
@@ -430,7 +450,8 @@ class GlobalAuthIdentifier:
                     confidence=0.6,
                     tis_score=check.get("tis"),
                     description=f"High-TIS blocking check ({check.get('pattern')})",
-                    detection_method="tis_analysis"
+                    detection_method="tis_semantic_verification",
+                    evidence=[semantic], applies_to=[str(hub_addr) + ":" + str(dispatch_addr)]
                 )
                 self.identified_mechanisms.append(mechanism)
     
@@ -444,15 +465,7 @@ class GlobalAuthIdentifier:
         if not func_name:
             return False
         
-        # Quick heuristic check
-        auth_indicators = ["auth", "login", "session", "check", "verify", "security"]
-        name_lower = func_name.lower()
-        
-        if any(ind in name_lower for ind in auth_indicators):
-            return True
-        
-        # For unclear cases, can invoke LLM (simplified here)
-        return False
+        return verify_security_check(self.ida, self.llm, func_name) is not None
 
 
 class LocalConstraintAnalyzer:
@@ -480,6 +493,8 @@ class LocalConstraintAnalyzer:
             {handler_addr: AuthMechanism} mapping
         """
         print(f"[LocalConstraint] Analyzing {len(handlers)} handlers...")
+        self.shared_utilities = []
+        self.handler_protections = {}
         
         # Phase 1: Scan shared resources
         self._identify_shared_utilities(handlers)
@@ -511,7 +526,7 @@ class LocalConstraintAnalyzer:
             if res.get("status") == "ok":
                 callees = res.get("data", [])
                 handler_callees[handler] = callees
-                for callee in callees:
+                for callee in set(callees):
                     # Filter out system functions
                     if not self._is_noise_function(callee):
                         callee_counter[callee] += 1
@@ -521,7 +536,7 @@ class LocalConstraintAnalyzer:
         
         for func in hotspots:
             # Check if it has blocking characteristics
-            blocking_res = self.ida.find_blocking_checks(func, threshold=2.0)
+            blocking_res = self.ida.find_blocking_checks(func, threshold=5.0)
             if blocking_res.get("status") == "ok":
                 checks = blocking_res.get("data", [])
                 if checks:
@@ -567,8 +582,9 @@ class LocalConstraintAnalyzer:
             tis_data = tis_res.get("data", [])
             
             # Find high TIS checks
-            high_tis = [t for t in tis_data if t.get("tis", 0) >= 2.5 and t.get("terminates")]
-            if high_tis:
+            high_tis = [t for t in tis_data if t.get("tis", 0) > 5.0 and t.get("terminates")]
+            verified = verify_security_check(self.ida, self.llm, handler, high_tis) if high_tis else None
+            if verified:
                 return AuthMechanism(
                     address=handler,
                     name=f"inline_check_{handler}",
@@ -576,7 +592,8 @@ class LocalConstraintAnalyzer:
                     confidence=0.5,
                     tis_score=max(t.get("tis", 0) for t in high_tis),
                     description=f"Has {len(high_tis)} inline blocking checks",
-                    detection_method="tis_analysis"
+                    detection_method="tis_semantic_verification",
+                    evidence=[verified]
                 )
         
         return None
@@ -593,9 +610,7 @@ class LocalConstraintAnalyzer:
     
     def _verify_shared_utility(self, func: str, checks: list) -> bool:
         """Verify if function is a shared authentication utility"""
-        # Simplified implementation: if it has high TIS checks, consider it might be an auth utility
-        max_tis = max(c.get("tis", 0) for c in checks) if checks else 0
-        return max_tis >= 3.0
+        return verify_security_check(self.ida, self.llm, func, checks) is not None
 
 
 class LogicDecoupler:
@@ -702,29 +717,18 @@ class LogicDecoupler:
         print("PANGU Logic Decoupler - Starting Analysis")
         print("=" * 60)
         
+        # Each run owns its results; repeated runs must not accumulate stale routes.
+        self.acdg = ACDG()
+        self.static_table_hierarchy = {}
+        self.gatekeeper_analyzer.gatekeepers = []
         # Save configuration for later use
         self.firmware_root = firmware_root
         self.current_binary = current_binary or firmware_name
         
         # Step 1: Get route data
-        if routes:
+        if routes is not None:
             # Use provided RouteNode list directly, preserving all fields including auth_state and protection_type
-            raw_routes = [
-                {
-                    "path": r.path,
-                    "full_path": r.path,
-                    "sub_path": r.sub_path,
-                    "handler": r.handler,
-                    "source_hub": r.source_hub,
-                    "source_type": r.source_type,
-                    "root": r.root,
-                    # Preserve auth state analyzed in Phase 1
-                    "auth_state": r.auth_state.value if hasattr(r.auth_state, 'value') else str(r.auth_state),
-                    "protection_type": r.protection_type.value if hasattr(r.protection_type, 'value') else str(r.protection_type),
-                    "protection_detail": r.protection_detail or ""
-                }
-                for r in routes
-            ]
+            raw_routes = [dict(r.to_dict(), full_path=r.path) for r in routes]
             print(f"[*] Using {len(raw_routes)} provided routes")
         else:
             # Load from file
@@ -834,7 +838,9 @@ class LogicDecoupler:
         if not skip_llm_gatekeeper:
             try:
                 if hasattr(self.ida, 'connect') and self.ida.connect():
-                    global_mechs = self.global_identifier.identify(list(hubs))
+                    contexts = [{'function': r['dispatch_function'], 'dispatch_address': r['dispatch_address']}
+                                for r in raw_routes if r.get('dispatch_function') and r.get('dispatch_address')]
+                    global_mechs = self.global_identifier.identify(contexts)
                     for mech in global_mechs:
                         self.acdg.add_global_auth(mech)
             except Exception as e:
@@ -886,6 +892,10 @@ class LogicDecoupler:
         # Step 7: Set metadata
         self.acdg.firmware_name = firmware_name
         self.acdg.analysis_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(self.ida, "get_status"):
+            status = self.ida.get_status()
+            if status.get("status") == "ok":
+                self.acdg.binary_id = status.get("data", {}).get("binary_id", "")
         
         # Print summary
         self.acdg.print_summary()
@@ -1498,342 +1508,76 @@ class LogicDecoupler:
         
         return self.run(route_nodes, firmware_name, init_func)
     
-    def _build_acdg_conservative(self, raw_routes: List[dict], 
+    def _build_acdg_conservative(self, raw_routes: List[dict],
                                   gatekeepers: List[GatekeeperInfo],
                                   local_protections: Dict[str, AuthMechanism]):
+        """Preserve uncertainty, provenance, and check presence independently.
+
+        Route naming, registration-time discovery, and an upstream whitelist
+        alone cannot establish request-time authentication coverage.
         """
-        Build ACDG - Use conservative strategy.
-        
-        Core principles:
-        1. If gatekeeper exists, default all routes to protected (Auth-Required)
-        2. Only mark Auth-Free for routes in whitelist or with clear bypass evidence
-        3. When uncertain, handle conservatively, mark as Auth-Required
-        4. Use static table hierarchy info to correct route's root field
-        """
-        print("[*] Building ACDG with CONSERVATIVE strategy...")
-        print(f"    Gatekeepers found: {len(gatekeepers)}")
-        
-        # Check if GoAhead found global auth functions
-        has_goahead_auth = (self.goahead_analyzer and 
-                           hasattr(self.goahead_analyzer, 'global_auth_handlers') and 
-                           len(self.goahead_analyzer.global_auth_handlers) > 0)
-        
-        has_gatekeeper = len(gatekeepers) > 0 or has_goahead_auth
-        
-        # Initialize whitelist variables
-        gk_names = []
-        all_whitelist_paths = set()
-        all_whitelist_patterns = []
-        
-        if has_gatekeeper:
-            gk_names = [gk.name for gk in gatekeepers]
-            if has_goahead_auth:
-                gk_names.extend([h.handler_func for h in self.goahead_analyzer.global_auth_handlers])
-            print(f"    Gatekeeper functions: {gk_names}")
-            
-            # Aggregate all whitelists
-            for gk in gatekeepers:
-                all_whitelist_paths.update(gk.whitelist_paths)
-                all_whitelist_patterns.extend(gk.whitelist_patterns)
-            
-            print(f"    Whitelist paths: {all_whitelist_paths}")
-            print(f"    Whitelist patterns: {all_whitelist_patterns}")
-        
-        # Check static table hierarchy info
-        if self.static_table_hierarchy:
-            print(f"    Static table hierarchy: {len(self.static_table_hierarchy)} tables mapped")
-        
-        auth_free_count = 0
-        auth_required_count = 0
-        
-        for route_data in raw_routes:
-            handler = route_data.get("handler", "")
-            path = route_data.get("full_path", route_data.get("path", ""))
-            root = route_data.get("root", "/")
-            source_hub = route_data.get("source_hub", "")
-            source_type = route_data.get("source_type", "")
-            
-            # === Correct route hierarchy ===
-            # If this route comes from static table and we know its hierarchy, correct root
-            if source_type == "static_table" and source_hub in self.static_table_hierarchy:
-                parent_path = self.static_table_hierarchy[source_hub]
-                if parent_path and parent_path != "/":
-                    root = parent_path
-                    # Note: don't modify path since path is the complete path
-                    # Only modify root field to represent hierarchy
-            
-            # Create RouteNode
-            route = RouteNode(
-                path=path,
-                sub_path=route_data.get("sub_path", route_data.get("path", "")),
-                handler=handler,
-                source_hub=source_hub,
-                source_type=source_type,
-                root=root
-            )
-            
-            # === Conservative strategy: determine auth state ===
-            
-            # === Prioritize using auth state already analyzed in Phase 1 ===
-            # (Applies to JSONRPC, GoForm, DistributedCGI architectures where auth state is determined during route extraction)
-            pre_analyzed_auth_state = route_data.get("auth_state")
-            pre_analyzed_protection = route_data.get("protection_type")
-            pre_analyzed_detail = route_data.get("protection_detail", "")
-            
-            # Special handling for distributed CGI architecture routes (from distributed_cgi_extractor)
-            if source_type in ["cgi_binary", "cgi_dispatch"]:
-                # Distributed CGI architecture's auth state is fully determined in Phase 1
-                # Directly use Phase 1 analysis results
-                if pre_analyzed_auth_state == "Auth-Required" or pre_analyzed_auth_state == "AUTH_REQUIRED":
-                    route.auth_state = AuthState.AUTH_REQUIRED
-                    route.protection_type = ProtectionType.GATEKEEPER
-                    route.protection_detail = pre_analyzed_detail or "CGI global login authentication"
-                    auth_required_count += 1
-                elif pre_analyzed_auth_state == "Auth-Free" or pre_analyzed_auth_state == "AUTH_FREE":
-                    route.auth_state = AuthState.AUTH_FREE
-                    route.protection_type = ProtectionType.NONE
-                    route.protection_detail = pre_analyzed_detail or "CGI no login authentication (may have CSRF-only)"
-                    auth_free_count += 1
-                else:
-                    # Unknown: conservative strategy, mark as needing further analysis
-                    route.auth_state = AuthState.UNKNOWN
-                    route.protection_type = ProtectionType.NONE
-                    route.protection_detail = "CGI auth pattern unknown - needs manual review"
-                
-                self.acdg.add_route(route)
-                continue  # Skip subsequent processing
-            
-            # Special handling for static analysis source routes
-            if source_type == "static_analysis":
-                # Static analysis routes have no handler, cannot do binary-level auth analysis
-                # Determine based on path characteristics and auth_hint
-                if pre_analyzed_auth_state == "Auth-Required":
-                    # Known auth-required routes (e.g., UCI module API)
-                    route.auth_state = AuthState.AUTH_REQUIRED
-                    route.protection_type = ProtectionType.GATEKEEPER
-                    route.protection_detail = pre_analyzed_detail or "API route - assumed protected"
-                    auth_required_count += 1
-                elif pre_analyzed_auth_state == "Auth-Free":
-                    route.auth_state = AuthState.AUTH_FREE
-                    route.protection_type = ProtectionType.NONE
-                    route.protection_detail = pre_analyzed_detail or "Login/Auth endpoint - no auth required"
-                    auth_free_count += 1
-                else:
-                    # Unknown: determine based on path characteristics
-                    # API paths usually require authentication
-                    if "/api/" in path or "/module/" in path or "/cgi-bin/" in path:
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        route.protection_type = ProtectionType.GATEKEEPER
-                        route.protection_detail = "API endpoint - assumed protected by gatekeeper"
-                        auth_required_count += 1
-                    elif "login" in path.lower() or "auth" in path.lower():
-                        route.auth_state = AuthState.AUTH_FREE
-                        route.protection_type = ProtectionType.NONE
-                        route.protection_detail = "Login/auth page - no authentication required"
-                        auth_free_count += 1
-                    else:
-                        # Conservative strategy: assume other paths require auth
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        route.protection_type = ProtectionType.NONE
-                        route.protection_detail = "Conservative: static route from filesystem"
-                        auth_required_count += 1
-                        
-            elif pre_analyzed_auth_state and pre_analyzed_auth_state != "Unknown":
-                # Phase 1 already analyzed auth state, use directly
-                if pre_analyzed_auth_state == "Auth-Required":
-                    route.auth_state = AuthState.AUTH_REQUIRED
-                    route.protection_type = ProtectionType.GATEKEEPER if pre_analyzed_protection == "Gatekeeper" else ProtectionType.INLINE_CHECK
-                    route.protection_detail = pre_analyzed_detail or "Pre-analyzed by route extractor"
-                    auth_required_count += 1
-                elif pre_analyzed_auth_state == "Auth-Free":
-                    route.auth_state = AuthState.AUTH_FREE
-                    route.protection_type = ProtectionType.NONE
-                    route.protection_detail = pre_analyzed_detail or "Pre-analyzed by route extractor (Auth-Free)"
-                    auth_free_count += 1
-                else:
-                    # Unknown or other -> continue with subsequent analysis
-                    pass
-            elif has_gatekeeper:
-                # Case 1: Gatekeeper exists
-                
-                # Check if path is protected by gatekeeper
-                is_protected, gk_name = self.gatekeeper_analyzer.is_path_protected(path)
-                
-                if is_protected:
-                    # Path is within gatekeeper protection scope
-                    
-                    # Check if in whitelist
-                    is_whitelisted, whitelist_reason = self.gatekeeper_analyzer.is_path_whitelisted(path)
-                    
-                    if is_whitelisted:
-                        # In whitelist -> Auth-Free
-                        route.auth_state = AuthState.AUTH_FREE
-                        route.protection_type = ProtectionType.NONE
-                        route.protection_detail = f"Whitelisted: {whitelist_reason}"
-                        auth_free_count += 1
-                    else:
-                        # Not in whitelist -> Auth-Required (protected by gatekeeper)
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        route.protection_type = ProtectionType.GATEKEEPER
-                        route.protection_detail = f"Protected by {gk_name}"
-                        auth_required_count += 1
-                else:
-                    # Path not in gatekeeper protection scope, check for local protection
-                    if handler in local_protections:
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        protection = local_protections[handler]
-                        route.protection_type = ProtectionType.INLINE_CHECK
-                        route.protection_detail = protection.description
-                        route.tis_score = protection.tis_score
-                        auth_required_count += 1
-                    else:
-                        # Conservative strategy: mark as auth-required when uncertain
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        route.protection_type = ProtectionType.NONE
-                        route.protection_detail = "Conservative: no clear bypass evidence"
-                        auth_required_count += 1
-            else:
-                # Case 2: No gatekeeper found
-                # Check for local protection
-                if handler in local_protections:
-                    route.auth_state = AuthState.AUTH_REQUIRED
-                    protection = local_protections[handler]
-                    route.protection_type = ProtectionType.INLINE_CHECK
-                    route.protection_detail = protection.description
-                    route.tis_score = protection.tis_score
-                    auth_required_count += 1
-                else:
-                    # No gatekeeper and no local protection
-                    # Conservative strategy: keep as Unknown (needs manual review) instead of assuming Auth-Free
-                    # Authentication may be at web server layer (e.g., uhttpd) not in binary
-                    route.auth_state = AuthState.UNKNOWN
-                    route.protection_type = ProtectionType.NONE
-                    route.protection_detail = "No gatekeeper found in binary, auth may be at web server level"
-                    # Note: Unknown routes don't count toward auth_free_count or auth_required_count
-            
-            self.acdg.add_route(route)
-        
-        # === Add whitelist paths as Auth-Free routes ===
-        # Whitelist paths (e.g., /userLogin.asp) may not be in extracted routes
-        # But they are explicitly allowed by auth function, should be marked Auth-Free
-        if has_gatekeeper and (all_whitelist_paths or all_whitelist_patterns):
-            existing_paths = set(route_data.get("full_path", route_data.get("path", "")) 
-                               for route_data in raw_routes)
-            
-            # Build sub_path -> handler mapping to associate whitelist routes with handlers
-            # E.g., from /goform/telnet can find telnet's handler
-            subpath_to_handler = {}
-            for route_data in raw_routes:
-                path = route_data.get("full_path", route_data.get("path", ""))
-                sub_path = route_data.get("sub_path", "")
-                handler = route_data.get("handler", "")
-                if sub_path and handler:
-                    subpath_to_handler[sub_path.lower()] = handler
-                # Also use full path as key
-                if path and handler:
-                    subpath_to_handler[path.lower()] = handler
-            
-            # Add whitelist paths
-            for wl_path in all_whitelist_paths:
-                if wl_path and wl_path not in existing_paths:
-                    # Try to find corresponding handler from existing routes
-                    handler = "(whitelisted)"
-                    wl_sub = wl_path.split("/")[-1] if "/" in wl_path else wl_path
-                    
-                    # Try multiple matching methods
-                    lookup_keys = [
-                        wl_path.lower(),           # Full path
-                        wl_sub.lower(),            # sub_path
-                        wl_sub.split(".")[0].lower() if "." in wl_sub else wl_sub.lower()  # Remove extension
-                    ]
-                    
-                    for key in lookup_keys:
-                        if key in subpath_to_handler:
-                            handler = subpath_to_handler[key]
-                            print(f"    [+] Found handler for {wl_path}: {handler}")
-                            break
-                    
-                    whitelist_route = RouteNode(
-                        path=wl_path,
-                        sub_path=wl_sub,
-                        handler=handler,
-                        source_hub="",
-                        source_type="whitelist",
-                        root="/"
-                    )
-                    whitelist_route.auth_state = AuthState.AUTH_FREE
-                    whitelist_route.protection_type = ProtectionType.NONE
-                    whitelist_route.protection_detail = f"Whitelisted in gatekeeper: {gk_names[0] if gk_names else 'unknown'}"
-                    self.acdg.add_route(whitelist_route)
-                    auth_free_count += 1
-                    print(f"    [+] Whitelist route added: {wl_path} -> {handler} (Auth-Free)")
-            
-            # Record whitelist patterns (these are pattern matching, cannot be added as specific routes)
-            if all_whitelist_patterns:
-                print(f"    [INFO] Whitelist patterns (for pattern matching): {all_whitelist_patterns}")
-        
-        print(f"[*] ACDG built: {auth_required_count} Auth-Required, {auth_free_count} Auth-Free")
-    
-    def _build_acdg(self, raw_routes: List[dict], 
-                   global_mechs: List[AuthMechanism],
-                   local_protections: Dict[str, AuthMechanism]):
-        """Build ACDG, annotate auth state for each route."""
-        print("[*] Building ACDG...")
-        
-        # Extract globally protected Handler set
-        global_protected = set()
-        for mech in global_mechs:
-            global_protected.add(mech.name)
-            global_protected.add(mech.address)
-        
-        for route_data in raw_routes:
-            handler = route_data.get("handler", "")
-            
-            # Create RouteNode
-            route = RouteNode(
-                path=route_data.get("full_path", route_data.get("path", "")),
-                sub_path=route_data.get("sub_path", route_data.get("path", "")),
-                handler=handler,
-                source_hub=route_data.get("source_hub", ""),
-                source_type=route_data.get("source_type", "unknown"),
-                root=route_data.get("root", "/")
-            )
-            
-            # Determine auth state
-            if handler in global_protected:
-                # Global protection
+        self.acdg.routes = []
+        self.acdg._update_stats()
+        self.acdg.routing_edges = []
+        for data in raw_routes:
+            data = dict(data)
+            data['path'] = data.get('full_path', data.get('path', ''))
+            aliases = {'AUTH_REQUIRED': 'Auth-Required', 'AUTH_FREE': 'Auth-Free', 'UNKNOWN': 'Unknown'}
+            data['auth_state'] = aliases.get(data.get('auth_state'), data.get('auth_state', 'Unknown'))
+            route = RouteNode.from_dict(data)
+            if route.source_type == 'static_analysis':
+                route.auth_state = AuthState.UNKNOWN
+                route.protection_type = ProtectionType.NONE
+                route.protection_detail = 'Filesystem route hint; binary handler/authentication unresolved'
+                route.analysis_gaps.append('Filesystem naming cannot prove authentication or reachability')
+            elif route.handler in local_protections:
+                protection = local_protections[route.handler]
                 route.auth_state = AuthState.AUTH_REQUIRED
-                route.protection_type = ProtectionType.GATEKEEPER
-                route.protection_detail = "Global gatekeeper protection"
-            elif handler in local_protections:
-                # Local protection
-                protection = local_protections[handler]
-                route.auth_state = AuthState.AUTH_REQUIRED
-                route.protection_type = ProtectionType(
-                    "SharedUtility" if "shared" in protection.mechanism_type 
-                    else "InlineCheck"
-                )
+                route.protection_type = (ProtectionType.SHARED_UTILITY if 'shared' in protection.mechanism_type
+                                         else ProtectionType.INLINE_CHECK)
                 route.protection_detail = protection.description
                 route.tis_score = protection.tis_score
+                route.auth_refs.append(protection.to_dict())
+            elif route.dispatch_function and route.dispatch_address and any(
+                    route.dispatch_function + ':' + route.dispatch_address in mechanism.applies_to
+                    for mechanism in self.acdg.global_auth_mechanisms):
+                route.auth_state = AuthState.AUTH_REQUIRED
+                route.protection_type = ProtectionType.GATEKEEPER
+                route.auth_refs.extend(mechanism.to_dict() for mechanism in self.acdg.global_auth_mechanisms
+                                       if route.dispatch_function + ':' + route.dispatch_address in mechanism.applies_to)
+                route.protection_detail = 'Semantically identified security check in request-time strict dominator context'
+            elif route.auth_state != AuthState.UNKNOWN:
+                # Preserve binary extractor observations but retain their source
+                # and any gaps; these labels do not certify enforcement.
+                if not route.auth_refs and route.auth_state == AuthState.AUTH_REQUIRED:
+                    route.auth_refs.append({'address': route.handler, 'source': route.source_type,
+                                            'description': route.protection_detail,
+                                            'effectiveness': 'unverified'})
             else:
-                # Check if it calls shared utilities
-                has_shared = False
-                for utility in self.local_analyzer.shared_utilities:
-                    # Simplified check
-                    if utility.name.lower() in handler.lower():
-                        has_shared = True
-                        route.auth_state = AuthState.AUTH_REQUIRED
-                        route.protection_type = ProtectionType.SHARED_UTILITY
-                        route.protection_detail = f"Likely calls {utility.name}"
-                        break
-                
-                if not has_shared:
-                    # No protection found -> Auth-Free
-                    route.auth_state = AuthState.AUTH_FREE
-                    route.protection_type = ProtectionType.NONE
-            
+                route.protection_type = ProtectionType.NONE
+                route.protection_detail = 'Applicable request-time security constraints unresolved'
+                route.analysis_gaps.append('No verified route-specific authentication association')
+                for gatekeeper in gatekeepers:
+                    route.analysis_gaps.append('Candidate gatekeeper ' + gatekeeper.name +
+                                               ': registration/scope hints require request-time verification')
+            if not route.handler:
+                route.analysis_gaps.append('Handler unresolved')
+            route.analysis_gaps = list(dict.fromkeys(route.analysis_gaps))
+            for mount in route.mount_chain:
+                if isinstance(mount, dict) and mount.get('parent') and mount.get('child') and mount.get('evidence'):
+                    edge = {'parent': mount['parent'], 'child': mount['child'], 'evidence': mount['evidence']}
+                    if edge not in self.acdg.routing_edges:
+                        self.acdg.routing_edges.append(edge)
             self.acdg.add_route(route)
-    
+
+    def _build_acdg(self, raw_routes: List[dict], global_mechs: List[AuthMechanism],
+                    local_protections: Dict[str, AuthMechanism]):
+        """Compatibility entry point using the same evidence-preserving policy."""
+        for mechanism in global_mechs:
+            if mechanism not in self.acdg.global_auth_mechanisms:
+                self.acdg.add_global_auth(mechanism)
+        self._build_acdg_conservative(raw_routes, [], local_protections)
+
     def _save_results(self):
         """Save analysis results."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

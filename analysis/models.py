@@ -46,6 +46,17 @@ class RouteNode:
     tis_score: Optional[float] = None           # TIS score
     has_sensitive_sink: bool = False            # Whether contains sensitive operations
     sensitive_sinks: List[str] = field(default_factory=list)
+    # Check presence and effectiveness are separate. Empty references or gaps
+    # must never be interpreted as a proof that the route is safe.
+    auth_refs: List[Dict] = field(default_factory=list)
+    analysis_gaps: List[str] = field(default_factory=list)
+    binary_id: str = ""
+    http_method: str = ""
+    selector: Dict = field(default_factory=dict)
+    mount_chain: List[Dict] = field(default_factory=list)
+    route_resolved: bool = False
+    dispatch_function: str = ""
+    dispatch_address: str = ""
     
     def to_dict(self) -> dict:
         """Convert to dictionary"""
@@ -61,14 +72,19 @@ class RouteNode:
             "protection_detail": self.protection_detail,
             "tis_score": self.tis_score,
             "has_sensitive_sink": self.has_sensitive_sink,
-            "sensitive_sinks": self.sensitive_sinks
+            "sensitive_sinks": self.sensitive_sinks,
+            "auth_refs": self.auth_refs, "analysis_gaps": self.analysis_gaps,
+            "binary_id": self.binary_id, "http_method": self.http_method,
+            "selector": self.selector, "mount_chain": self.mount_chain,
+            "route_resolved": self.route_resolved,
+            "dispatch_function": self.dispatch_function, "dispatch_address": self.dispatch_address
         }
     
     @classmethod
     def from_dict(cls, data: dict) -> "RouteNode":
         """Create from dictionary"""
         return cls(
-            path=data.get("path", data.get("full_path", "")),
+            path=data.get("full_path", data.get("path", "")),
             sub_path=data.get("sub_path", ""),
             handler=data.get("handler", ""),
             source_hub=data.get("source_hub", ""),
@@ -79,7 +95,12 @@ class RouteNode:
             protection_detail=data.get("protection_detail"),
             tis_score=data.get("tis_score"),
             has_sensitive_sink=data.get("has_sensitive_sink", False),
-            sensitive_sinks=data.get("sensitive_sinks", [])
+            sensitive_sinks=data.get("sensitive_sinks", []),
+            auth_refs=data.get("auth_refs", []), analysis_gaps=data.get("analysis_gaps", []),
+            binary_id=data.get("binary_id", ""), http_method=data.get("http_method", ""),
+            selector=data.get("selector", {}), mount_chain=data.get("mount_chain", []),
+            route_resolved=data.get("route_resolved", False),
+            dispatch_function=data.get("dispatch_function", ""), dispatch_address=data.get("dispatch_address", "")
         )
 
 
@@ -96,6 +117,8 @@ class AuthMechanism:
     detection_method: str = ""                  # Detection method
     tis_score: Optional[float] = None
     keywords_matched: List[str] = field(default_factory=list)
+    evidence: List[Dict] = field(default_factory=list)
+    applies_to: List[str] = field(default_factory=list)
     
     def to_dict(self) -> dict:
         return asdict(self)
@@ -123,11 +146,19 @@ class ACDG:
     # Metadata
     firmware_name: str = ""
     analysis_timestamp: str = ""
+    routing_edges: List[Dict] = field(default_factory=list)
+    binary_id: str = ""
+
+    def __post_init__(self):
+        self._update_stats()
     
     def add_route(self, route: RouteNode):
         """Add a route node"""
         self.routes.append(route)
-        self._update_stats()
+        self.total_routes += 1
+        self.auth_required_count += route.auth_state == AuthState.AUTH_REQUIRED
+        self.auth_free_count += route.auth_state == AuthState.AUTH_FREE
+        self.unknown_count += route.auth_state == AuthState.UNKNOWN
     
     def add_global_auth(self, mechanism: AuthMechanism):
         """Add a global authentication mechanism"""
@@ -162,8 +193,10 @@ class ACDG:
         """Convert to dictionary"""
         self._update_stats()
         return {
+            "schema_version": 2,
             "metadata": {
                 "firmware_name": self.firmware_name,
+                "binary_id": self.binary_id,
                 "analysis_timestamp": self.analysis_timestamp,
                 "total_routes": self.total_routes,
                 "auth_required_count": self.auth_required_count,
@@ -172,7 +205,8 @@ class ACDG:
             },
             "global_auth_mechanisms": [m.to_dict() for m in self.global_auth_mechanisms],
             "shared_auth_utilities": [m.to_dict() for m in self.shared_auth_utilities],
-            "routes": [r.to_dict() for r in self.routes]
+            "routes": [r.to_dict() for r in self.routes],
+            "routing_edges": self.routing_edges
         }
     
     def save_json(self, filepath: str):
@@ -180,7 +214,7 @@ class ACDG:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
     
-        @classmethod
+    @classmethod
     def load_json(cls, filepath: str) -> "ACDG":
         """Load from JSON file"""
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -191,7 +225,9 @@ class ACDG:
         # Load metadata
         meta = data.get("metadata", {})
         acdg.firmware_name = meta.get("firmware_name", "")
+        acdg.binary_id = meta.get("binary_id", "")
         acdg.analysis_timestamp = meta.get("analysis_timestamp", "")
+        acdg.routing_edges = data.get("routing_edges", [])
         
         # Load authentication mechanisms
         for m in data.get("global_auth_mechanisms", []):
@@ -248,6 +284,8 @@ class VulnerabilityFinding:
     severity: Optional[str] = None              # Severity: CRITICAL/HIGH/MEDIUM/LOW
     attack_vector: str = ""                     # Attack vector description
     counterfactual_analysis: Dict = field(default_factory=dict)  # Counterfactual analysis result
+    evidence_records: List[Dict] = field(default_factory=list)
+    review_status: str = "UNRESOLVED"
     
     def to_dict(self) -> dict:
         return {
@@ -262,7 +300,9 @@ class VulnerabilityFinding:
             "attack_vector": self.attack_vector,
             "detective_reasoning": self.detective_reasoning,
             "reviewer_verdict": self.reviewer_verdict,
-            "counterfactual_analysis": self.counterfactual_analysis
+            "counterfactual_analysis": self.counterfactual_analysis,
+            "evidence_records": self.evidence_records,
+            "review_status": self.review_status
         }
 
 
@@ -276,6 +316,8 @@ class AnalysisReport:
     auth_required_routes: int = 0
     findings: List[VulnerabilityFinding] = field(default_factory=list)
     duration_seconds: float = 0.0
+    unresolved_findings: List[VulnerabilityFinding] = field(default_factory=list)
+    coverage: Dict = field(default_factory=dict)
     
     def add_finding(self, finding: VulnerabilityFinding):
         self.findings.append(finding)
@@ -303,7 +345,9 @@ class AnalysisReport:
                 "high_confidence": len(self.get_high_confidence_vulns()),
                 "critical": len(self.get_critical_vulns())
             },
-            "findings": [v.to_dict() for v in self.findings]
+            "findings": [v.to_dict() for v in self.findings],
+            "unresolved_findings": [v.to_dict() for v in self.unresolved_findings],
+            "coverage": self.coverage
         }
     
     def save_json(self, filepath: str):

@@ -57,25 +57,27 @@ class JSONRPCMethodInfo:
     def to_route_node(self) -> RouteNode:
         """Convert to standard RouteNode"""
         # Infer authentication state based on method characteristics
-        if self.is_auth_free:
-            auth_state = AuthState.AUTH_FREE
-            protection = ProtectionType.NONE
-            detail = f"Auth-Free JSON-RPC method: {self.method}"
-        else:
+        if self.requires_privilege > 0:
             auth_state = AuthState.AUTH_REQUIRED
             protection = ProtectionType.GATEKEEPER
-            detail = f"JSON-RPC method protected by session/token check"
+            detail = f"Observed JSON-RPC privilege check (level {self.requires_privilege}); enforcement unverified"
+        else:
+            auth_state = AuthState.UNKNOWN
+            protection = ProtectionType.NONE
+            detail = "Method naming alone cannot establish authentication state"
         
         # JSON-RPC method path format
-        path = f"/jsonrpc#{self.method}"
+        path = self.method
         
         return RouteNode(
             path=path,
             sub_path=self.method,
-            handler=self.handler,
+            handler=self.handler_addr or self.handler,
             source_hub=self.source_location,
             source_type="jsonrpc_method",
-            root="/cgi-bin/jsonrpc",
+            root="/",
+            selector={"kind": "jsonrpc", "field": "method", "value": self.method},
+            analysis_gaps=["JSON-RPC transport endpoint and request-time check applicability unresolved"],
             auth_state=auth_state,
             protection_type=protection,
             protection_detail=detail

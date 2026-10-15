@@ -36,7 +36,7 @@ class PANGUPipeline:
     - Auto-detection or manual specification
     """
     
-    def __init__(self, ida_host: str = "localhost", ida_port: int = 18811):
+    def __init__(self, ida_host: str = "127.0.0.1", ida_port: int = 4455):
         """Initialize pipeline"""
         self.ida = IDAProClient(ida_host, ida_port)
         self.llm = LLMProvider()
@@ -58,6 +58,8 @@ class PANGUPipeline:
         """Check IDA connection"""
         print("\n[Phase 0] Checking IDA Pro connection...")
         try:
+            if not self.ida.connect():
+                return False
             status = self.ida.get_status()
             if status.get("status") == "ok":
                 data = status.get("data", {})
@@ -111,17 +113,7 @@ class PANGUPipeline:
             self.raw_routes = extractor.load_routes_from_file(routes_json)
             
             # Convert to dict format for compatibility with subsequent processing
-            self.raw_routes = [
-                {
-                    "path": r.path,
-                    "sub_path": r.sub_path,
-                    "handler": r.handler,
-                    "source_hub": r.source_hub,
-                    "source_type": r.source_type,
-                    "root": r.root
-                }
-                for r in extractor.routes
-            ]
+            self.raw_routes = [r.to_dict() for r in extractor.routes]
             
             print(f"  Loaded {len(self.raw_routes)} routes")
         else:
@@ -152,20 +144,7 @@ class PANGUPipeline:
                 saved_path = extractor.save_routes(self.firmware_name)
                 
                 # Convert format
-                self.raw_routes = [
-                    {
-                        "path": r.path,
-                        "sub_path": r.sub_path,
-                        "handler": r.handler,
-                        "source_hub": r.source_hub,
-                        "source_type": r.source_type,
-                        "root": r.root,
-                        "auth_state": r.auth_state.value,
-                        "protection_type": r.protection_type.value,
-                        "protection_detail": r.protection_detail
-                    }
-                    for r in routes
-                ]
+                self.raw_routes = [r.to_dict() for r in routes]
                 
                 print(f"  Extracted {len(self.raw_routes)} routes (FastCGI)")
                 print(f"  Saved to: {saved_path}")
@@ -190,17 +169,7 @@ class PANGUPipeline:
                 saved_path = extractor.save_routes()
                 
                 # Convert format
-                self.raw_routes = [
-                    {
-                        "path": r.path,
-                        "sub_path": r.sub_path,
-                        "handler": r.handler,
-                        "source_hub": r.source_hub,
-                        "source_type": r.source_type,
-                        "root": r.root
-                    }
-                    for r in routes
-                ]
+                self.raw_routes = [r.to_dict() for r in routes]
                 
                 print(f"  Extracted {len(self.raw_routes)} routes (GoAhead/Standard)")
                 print(f"  Saved to: {saved_path}")
@@ -227,14 +196,7 @@ class PANGUPipeline:
         # Convert raw routes to RouteNode
         route_nodes = []
         for r in self.raw_routes:
-            node = RouteNode(
-                path=r.get("path", ""),
-                sub_path=r.get("sub_path", ""),
-                handler=r.get("handler", ""),
-                source_hub=r.get("source_hub", ""),
-                source_type=r.get("source_type", "unknown"),
-                root=r.get("root", "/")
-            )
+            node = RouteNode.from_dict(r)
             route_nodes.append(node)
         
         print(f"  Input: {len(route_nodes)} routes")
@@ -273,7 +235,7 @@ class PANGUPipeline:
             return
         
         # Initialize dual-agent detector
-        detector = DualAgentDetector()
+        detector = DualAgentDetector(ida_client=self.ida, llm=self.llm)
         detector.set_acdg(self.acdg)
         detector.verbose = self.verbose
         
@@ -357,7 +319,7 @@ Examples:
     parser.add_argument("--acdg", "-a", help="Path to ACDG JSON file (skip Phase 3)")
     parser.add_argument("--output", "-o", default="output", help="Output directory")
     parser.add_argument("--host", default="localhost", help="IDA Pro host")
-    parser.add_argument("--port", type=int, default=18811, help="IDA Pro port")
+    parser.add_argument("--port", type=int, default=4455, help="IDA Pro port")
     parser.add_argument("--only-phase", type=int, choices=[2, 3, 4], 
                         help="Run only specified phase")
     parser.add_argument("--quiet", "-q", action="store_true", help="Less verbose output")

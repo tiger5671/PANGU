@@ -936,7 +936,7 @@ class FirmwareAnalyzer:
             with open(path, 'rb') as f:
                 header = f.read(20)
                 
-                if header[:4] != b'\x7fELF':
+                if len(header) < 20 or header[:4] != b'\x7fELF' or header[4] not in (1, 2) or header[5] not in (1, 2):
                     return "unknown"
                 
                 # ELF class (32/64 bit)
@@ -944,7 +944,7 @@ class FirmwareAnalyzer:
                 class_str = "32-bit" if ei_class == 1 else "64-bit"
                 
                 # Machine type
-                machine = header[18] | (header[19] << 8)
+                machine = int.from_bytes(header[18:20], 'little' if header[5] == 1 else 'big')
                 machine_map = {
                     3: "x86",
                     8: "MIPS",
