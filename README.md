@@ -6,8 +6,6 @@ Source code for the paper: **"PANGU: Semantics-Aware Logic Decoupling for Broken
 
 PANGU is a static analysis framework leveraging semantic-aware logic decoupling to detect BAC vulnerabilities.
 
-本轮优化的实现、验证结果与未完成事项见：[优化阶段记录（2026-10-15）](notes/2026-10-15-optimization-progress.md)。当前尚未完成整体检测效果评估。
-
 ---
 
 ## Quick Start
