@@ -2,7 +2,7 @@
 
 <!-- Copyright (c) 2026 The Pangu Project Authors. All rights reserved. -->
 
-Source code for the paper: **"Pangu: Semantic-Aware Logic Decoupling for Broken Access Control Detection in Embedded Systems"**
+Source code for the paper: **"PANGU: Semantics-Aware Logic Decoupling for Broken Access Control Detection in Embedded Systems"**
 
 PANGU is a static analysis framework leveraging semantic-aware logic decoupling to detect BAC vulnerabilities.
 
@@ -169,6 +169,7 @@ Results are saved in the `output/` directory:
 PANGU/
 ├── PANGU.py                  # Main entry point
 ├── README.md
+├── reproducibility/           # Paper artifacts and evaluation metadata
 ├── requirements.txt
 │
 ├── analysis/                 # Analysis modules
@@ -200,6 +201,30 @@ PANGU/
 ├── scripts/                  # Utility scripts
 └── output/                   # Analysis results
 ```
+
+---
+
+## Research artifacts
+
+The materials accompanying the revised paper are available in [reproducibility/](reproducibility/README.md):
+
+- [Evaluation firmware inventory](reproducibility/dataset/README.md): 42 firmware images from 13 vendors and 78 known benchmark CVE references, in Markdown, JSON, and the original Excel workbook.
+- [Official firmware source portals](reproducibility/dataset/vendor_sources.md): vendor support/download references, with the available metadata and its limits.
+- [Four prompt templates](reproducibility/prompts/README.md), [reported model settings](reproducibility/prompts/model_configuration.json), and [output formats](reproducibility/prompts/output_formats.md).
+- [Analysis definitions](reproducibility/docs/analysis_definitions.md), including ACDG semantics and TIS counting rules, and the [evaluation protocol](reproducibility/docs/evaluation_protocol.md).
+- [Artifact availability](reproducibility/docs/artifact_availability.md), including the disclosure status of materials for unpatched findings.
+
+The Detective and Reviewer perform static binary analysis. Researchers subsequently construct PoCs and validate supported findings on physical devices or through QEMU-based emulation. The newly discovered vulnerabilities are reported separately from the known-vulnerability benchmark.
+
+Run the material checks from the repository root:
+
+```bash
+python reproducibility/scripts/validate_materials.py
+```
+
+This command checks the published inventory and documentation files without IDA or an API key. It does not rerun the firmware experiments.
+
+See the [artifact update notes](RESEARCH_ARTIFACTS_UPDATE_20261106.md) for the scope of this documentation release.
 
 ---
 

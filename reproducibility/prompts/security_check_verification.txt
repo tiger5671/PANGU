@@ -1,0 +1,22 @@
+ROLE: Classifier of candidate checks in decompiled embedded Web code.
+INPUT:
+  candidate_block_or_condition: {code_and_address}
+  source_kind: {PATH_DOMINATING | ASYMMETRIC_GUARD}
+  caller_dispatch_context: {known_request_path_and_dispatch_sites}
+  branch_successors: {termination_and_continuation_evidence}
+  related_calls_and_strings: {bounded_semantic_evidence}
+TASK: Classify the purpose of the candidate checkpoint.
+PROCEDURE:
+  1. Inspect the predicate, its operands, and any called comparison or
+     validation routines. Record their code locations.
+  2. Follow both successors to identify the failure destination and the
+     processing that continues after the check.
+  3. Use AUTHENTICATION for identity, session, or token checks, and
+     AUTHORIZATION for role, permission, or resource-ownership checks.
+  4. Use NON_SECURITY for input-format checks, I/O failures, diagnostics,
+     or loop control. Cite the predicate and calls supporting the label.
+  5. Use UNRESOLVED when missing code or unresolved operands prevent
+     classification. Return the input source_kind with the result.
+OUTPUT: A JSON object containing
+  check_label (AUTHENTICATION | AUTHORIZATION | NON_SECURITY | UNRESOLVED),
+  checkpoint_ref, evidence_refs, explanation, and source_kind.

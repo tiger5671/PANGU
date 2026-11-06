@@ -1,0 +1,97 @@
+{
+  "reference_review_date": "2026-11-03",
+  "scope": "Official vendor portals only; exact downloads for the evaluated binaries are not verified.",
+  "vendors": [
+    {
+      "vendor": "Cisco",
+      "portal_url": "https://software.cisco.com/download/home",
+      "reference_url": "https://software.cisco.com/download/static/assets/i18n/help.html",
+      "scope": "support_or_download_portal",
+      "access_note": "Software download portal; the portal may redirect to Cisco sign-in."
+    },
+    {
+      "vendor": "D-Link",
+      "portal_url": "https://support.dlink.com/",
+      "reference_url": "https://support.dlink.com/",
+      "scope": "support_or_download_portal",
+      "access_note": "Search by model; the support page also links to its legacy-product site."
+    },
+    {
+      "vendor": "H3C",
+      "portal_url": "https://www.h3c.com/cn/Service/Document_Software/Software_Download/",
+      "reference_url": "https://www.h3c.com/cn/Service/Document_Software/Software_Download/",
+      "scope": "support_or_download_portal",
+      "access_note": "Official Chinese software-download entry point."
+    },
+    {
+      "vendor": "Linksys",
+      "portal_url": "https://support.linksys.com/",
+      "reference_url": "https://support.linksys.com/kb/article/101/",
+      "scope": "support_or_download_portal",
+      "access_note": "The linked official guide explains model-specific firmware downloads."
+    },
+    {
+      "vendor": "Mercury",
+      "portal_url": "https://service.mercurycom.com.cn/",
+      "reference_url": "https://service.mercurycom.com.cn/",
+      "scope": "support_or_download_portal",
+      "access_note": "Official service portal with a download-center entry."
+    },
+    {
+      "vendor": "NETGEAR",
+      "portal_url": "https://www.netgear.com/support/download/",
+      "reference_url": "https://www.netgear.com/support/download/",
+      "scope": "support_or_download_portal",
+      "access_note": "Redirects to the vendor download application; no exact binary was checked."
+    },
+    {
+      "vendor": "Tenda",
+      "portal_url": "https://www.tendacn.com/download/",
+      "reference_url": "https://www.tendacn.com/download/",
+      "scope": "support_or_download_portal",
+      "access_note": "Official global download center."
+    },
+    {
+      "vendor": "TOTOLINK",
+      "portal_url": "https://m.totolink.net/portal/list/index/id/5.html",
+      "reference_url": "https://m.totolink.net/portal/list/index/id/5.html",
+      "scope": "support_or_download_portal",
+      "access_note": "Official mobile download center with model search."
+    },
+    {
+      "vendor": "TP-Link",
+      "portal_url": "https://www.tp-link.com/en/support/download/",
+      "reference_url": "https://www.tp-link.com/en/support/download/",
+      "scope": "support_or_download_portal",
+      "access_note": "Official global download center."
+    },
+    {
+      "vendor": "TRENDnet",
+      "portal_url": "https://www.trendnet.com/support/",
+      "reference_url": "https://www.trendnet.com/support/",
+      "scope": "support_or_download_portal",
+      "access_note": "Official product-support portal."
+    },
+    {
+      "vendor": "Ubiquiti",
+      "portal_url": "https://ui.com/download",
+      "reference_url": "https://ui.com/download",
+      "scope": "support_or_download_portal",
+      "access_note": "Official software portal; historical releases are not guaranteed to remain available."
+    },
+    {
+      "vendor": "WAVLINK",
+      "portal_url": "https://www.wavlink.com/zh_cn/Firmware.html",
+      "reference_url": "https://www.wavlink.com/zh_cn/Firmware.html",
+      "scope": "support_or_download_portal",
+      "access_note": "Official Chinese firmware search page."
+    },
+    {
+      "vendor": "Zyxel",
+      "portal_url": "https://www.zyxel.com/global/en/support/download",
+      "reference_url": "https://www.zyxel.com/global/en/support/download",
+      "scope": "support_or_download_portal",
+      "access_note": "Official global download library."
+    }
+  ]
+}

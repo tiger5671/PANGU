@@ -1,0 +1,459 @@
+{
+  "schema_version": "1.0",
+  "source_workbook": {
+    "file": "PANGU_Firmware_Dataset_42_Images.xlsx",
+    "sha256": "48d92c057dc344c18f8ba9c8cec3722253a35ca604284208122b5f029abb09c2"
+  },
+  "counts": {
+    "images": 42,
+    "vendors": 13,
+    "known_bac_cves": 78
+  },
+  "version_display_rule": "Preserve source strings separately; remove [decoded] annotations and display image 40 as 20220721 (release build).",
+  "images": [
+    {
+      "image_id": 1,
+      "vendor": "Cisco",
+      "device_model": "RV-042",
+      "firmware_version": "v4.2.3.14 (2020-05-28)",
+      "firmware_version_source": "v4.2.3.14 (2020-05-28)",
+      "known_bac_cves": [
+        "CVE-2023-20025"
+      ]
+    },
+    {
+      "image_id": 2,
+      "vendor": "Cisco",
+      "device_model": "RV340/RV345",
+      "firmware_version": "v1.0.03.29 (RV345; 2022-10-17)",
+      "firmware_version_source": "v1.0.03.29 (RV345; 2022-10-17)",
+      "known_bac_cves": [
+        "CVE-2021-1472"
+      ]
+    },
+    {
+      "image_id": 3,
+      "vendor": "Cisco",
+      "device_model": "RV110W",
+      "firmware_version": "v1.2.2.8",
+      "firmware_version_source": "v1.2.2.8",
+      "known_bac_cves": [
+        "CVE-2022-20825",
+        "CVE-2021-1459"
+      ]
+    },
+    {
+      "image_id": 4,
+      "vendor": "D-Link",
+      "device_model": "DIR-816",
+      "firmware_version": "A2 v1.10CNB05 (R1B011D88210)",
+      "firmware_version_source": "A2 v1.10CNB05 (R1B011D88210)",
+      "known_bac_cves": [
+        "CVE-2019-10039",
+        "CVE-2019-10040",
+        "CVE-2019-10041",
+        "CVE-2019-10042",
+        "CVE-2022-37133",
+        "CVE-2022-37128",
+        "CVE-2022-36619",
+        "CVE-2024-13102",
+        "CVE-2024-13103",
+        "CVE-2024-13104",
+        "CVE-2024-13105",
+        "CVE-2024-13106",
+        "CVE-2024-13107",
+        "CVE-2024-13108"
+      ]
+    },
+    {
+      "image_id": 5,
+      "vendor": "D-Link",
+      "device_model": "DIR-859",
+      "firmware_version": "A1 FW1.05B03",
+      "firmware_version_source": "A1 FW1.05B03",
+      "known_bac_cves": [
+        "CVE-2019-17621",
+        "CVE-2023-36092"
+      ]
+    },
+    {
+      "image_id": 6,
+      "vendor": "D-Link",
+      "device_model": "DIR-882",
+      "firmware_version": "A1 FW1.10B02",
+      "firmware_version_source": "A1 FW1.10B02",
+      "known_bac_cves": [
+        "CVE-2020-15633",
+        "CVE-2025-60697",
+        "CVE-2025-60698",
+        "CVE-2025-60700",
+        "CVE-2025-60701"
+      ]
+    },
+    {
+      "image_id": 7,
+      "vendor": "D-Link",
+      "device_model": "DIR-878",
+      "firmware_version": "FW1.20B05",
+      "firmware_version_source": "FW1.20B05",
+      "known_bac_cves": [
+        "CVE-2025-0481",
+        "CVE-2025-60672",
+        "CVE-2025-60673",
+        "CVE-2025-60676"
+      ]
+    },
+    {
+      "image_id": 8,
+      "vendor": "D-Link",
+      "device_model": "DIR-823G",
+      "firmware_version": "v1.0.2B05 (2018-12-07)",
+      "firmware_version_source": "v1.0.2B05 (2018-12-07)",
+      "known_bac_cves": [
+        "CVE-2019-7388",
+        "CVE-2019-7389",
+        "CVE-2019-7390",
+        "CVE-2019-8392",
+        "CVE-2023-26613",
+        "CVE-2023-26615",
+        "CVE-2024-13030",
+        "CVE-2025-2359",
+        "CVE-2025-2360"
+      ]
+    },
+    {
+      "image_id": 9,
+      "vendor": "D-Link",
+      "device_model": "DNS-320",
+      "firmware_version": "v1.11b01 (DNS-320L; 2018-03-23)",
+      "firmware_version_source": "v1.11b01 (DNS-320L; 2018-03-23)",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 10,
+      "vendor": "H3C",
+      "device_model": "GR-1200W",
+      "firmware_version": "MiniGRW1A0V100R006",
+      "firmware_version_source": "MiniGRW1A0V100R006",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 11,
+      "vendor": "H3C",
+      "device_model": "GR3200",
+      "firmware_version": "MiniGR1A0V100R014",
+      "firmware_version_source": "MiniGR1A0V100R014",
+      "known_bac_cves": [
+        "CVE-2024-32238",
+        "CVE-2025-44635"
+      ]
+    },
+    {
+      "image_id": 12,
+      "vendor": "H3C",
+      "device_model": "NX15",
+      "firmware_version": "EUV100R007",
+      "firmware_version_source": "EUV100R007",
+      "known_bac_cves": [
+        "CVE-2025-2725"
+      ]
+    },
+    {
+      "image_id": 13,
+      "vendor": "Linksys",
+      "device_model": "E2000",
+      "firmware_version": "v1.0.06.001 US (2014-03-10)",
+      "firmware_version_source": "v1.0.06.001 US (2014-03-10)",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 14,
+      "vendor": "Linksys",
+      "device_model": "E2500",
+      "firmware_version": "v3.0.04.002 (2017-12-11)",
+      "firmware_version_source": "v3.0.04.002 (2017-12-11)",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 15,
+      "vendor": "Linksys",
+      "device_model": "E1700",
+      "firmware_version": "v1.0.03.003 (2016-05-12)",
+      "firmware_version_source": "v1.0.03.003 (2016-05-12)",
+      "known_bac_cves": [
+        "CVE-2024-22543"
+      ]
+    },
+    {
+      "image_id": 16,
+      "vendor": "Linksys",
+      "device_model": "WRT54GL",
+      "firmware_version": "v4.30.18.006 US (2016-01-08)",
+      "firmware_version_source": "v4.30.18.006 US (2016-01-08)",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 17,
+      "vendor": "Mercury",
+      "device_model": "MNVR816",
+      "firmware_version": "V2.0 / 1.0.5 Build 240313 Rel.53219n",
+      "firmware_version_source": "V2.0 / 1.0.5 Build 240313 Rel.53219n",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 18,
+      "vendor": "Mercury",
+      "device_model": "X18G",
+      "firmware_version": "M18G V1.0 / 1.0.1 (2020-07-13)",
+      "firmware_version_source": "M18G V1.0 / 1.0.1 (2020-07-13)",
+      "known_bac_cves": [
+        "CVE-2021-23241"
+      ]
+    },
+    {
+      "image_id": 19,
+      "vendor": "NETGEAR",
+      "device_model": "R6200V2",
+      "firmware_version": "V1.0.3.12_10.1.11",
+      "firmware_version_source": "V1.0.3.12_10.1.11",
+      "known_bac_cves": [
+        "CVE-2019-17372"
+      ]
+    },
+    {
+      "image_id": 20,
+      "vendor": "NETGEAR",
+      "device_model": "R6800",
+      "firmware_version": "V1.2.0.62_1.0.1",
+      "firmware_version_source": "V1.2.0.62_1.0.1",
+      "known_bac_cves": [
+        "CVE-2020-27866",
+        "CVE-2020-27867"
+      ]
+    },
+    {
+      "image_id": 21,
+      "vendor": "NETGEAR",
+      "device_model": "R7000",
+      "firmware_version": "V1.0.11.100_10.2.100",
+      "firmware_version_source": "V1.0.11.100_10.2.100",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 22,
+      "vendor": "NETGEAR",
+      "device_model": "SRX5308",
+      "firmware_version": "v4.3.5-3",
+      "firmware_version_source": "v4.3.5-3",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 23,
+      "vendor": "Tenda",
+      "device_model": "AC15",
+      "firmware_version": "V15.03.05.19 (V1.0BR)",
+      "firmware_version_source": "V15.03.05.19 (V1.0BR)",
+      "known_bac_cves": [
+        "CVE-2020-10988",
+        "CVE-2021-44971"
+      ]
+    },
+    {
+      "image_id": 24,
+      "vendor": "Tenda",
+      "device_model": "AX12",
+      "firmware_version": "V22.03.01.21_cn (V1.0)",
+      "firmware_version_source": "V22.03.01.21_cn (V1.0)",
+      "known_bac_cves": [
+        "CVE-2023-47422",
+        "CVE-2022-45995"
+      ]
+    },
+    {
+      "image_id": 25,
+      "vendor": "TOTOLINK",
+      "device_model": "T10",
+      "firmware_version": "V5.9c.1485_B20180122",
+      "firmware_version_source": "V5.9c.1485_B20180122",
+      "known_bac_cves": [
+        "CVE-2025-9533"
+      ]
+    },
+    {
+      "image_id": 26,
+      "vendor": "TOTOLINK",
+      "device_model": "A950RG",
+      "firmware_version": "V5.9c.4592_B20191022",
+      "firmware_version_source": "V5.9c.4592_B20191022",
+      "known_bac_cves": [
+        "CVE-2025-28034",
+        "CVE-2025-28037",
+        "CVE-2025-28036",
+        "CVE-2025-28032",
+        "CVE-2025-28033",
+        "CVE-2025-60702"
+      ]
+    },
+    {
+      "image_id": 27,
+      "vendor": "TOTOLINK",
+      "device_model": "N600R",
+      "firmware_version": "V4.3.0cu.7647_B20210106",
+      "firmware_version_source": "V4.3.0cu.7647_B20210106",
+      "known_bac_cves": [
+        "CVE-2023-43141"
+      ]
+    },
+    {
+      "image_id": 28,
+      "vendor": "TOTOLINK",
+      "device_model": "LR1200GB",
+      "firmware_version": "V9.1.0u.6619_B20230130",
+      "firmware_version_source": "V9.1.0u.6619_B20230130",
+      "known_bac_cves": [
+        "CVE-2025-60687"
+      ]
+    },
+    {
+      "image_id": 29,
+      "vendor": "TOTOLINK",
+      "device_model": "N200RE",
+      "firmware_version": "V9.3.5u.6139_B20201216",
+      "firmware_version_source": "V9.3.5u.6139_B20201216",
+      "known_bac_cves": [
+        "CVE-2019-19822",
+        "CVE-2023-4746",
+        "CVE-2022-46025",
+        "CVE-2025-55895"
+      ]
+    },
+    {
+      "image_id": 30,
+      "vendor": "TOTOLINK",
+      "device_model": "EX1800T",
+      "firmware_version": "V9.1.0cu.2112_B20220316",
+      "firmware_version_source": "V9.1.0cu.2112_B20220316",
+      "known_bac_cves": [
+        "CVE-2024-34257"
+      ]
+    },
+    {
+      "image_id": 31,
+      "vendor": "TOTOLINK",
+      "device_model": "X5000R",
+      "firmware_version": "V9.1.0cu.2350 (2023-03-13)",
+      "firmware_version_source": "V9.1.0cu.2350 (2023-03-13)",
+      "known_bac_cves": [
+        "CVE-2023-39617"
+      ]
+    },
+    {
+      "image_id": 32,
+      "vendor": "TOTOLINK",
+      "device_model": "X6000R",
+      "firmware_version": "V9.4.0cu.852_B20230719",
+      "firmware_version_source": "V9.4.0cu.852_B20230719",
+      "known_bac_cves": [
+        "CVE-2025-52053",
+        "CVE-2023-46978"
+      ]
+    },
+    {
+      "image_id": 33,
+      "vendor": "TP-Link",
+      "device_model": "Archer A7",
+      "firmware_version": "v5 1.2.1 P1 (2022-07-14; Rel.75573)",
+      "firmware_version_source": "v5 1.2.1 P1 (2022-07-14; Rel.75573)",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 34,
+      "vendor": "TP-Link",
+      "device_model": "Tapo C200",
+      "firmware_version": "C100 v2 / 1.1.15 Build 211130 Rel.15378n",
+      "firmware_version_source": "C100 v2 / 1.1.15 Build 211130 Rel.15378n",
+      "known_bac_cves": [
+        "CVE-2021-4045"
+      ]
+    },
+    {
+      "image_id": 35,
+      "vendor": "TP-Link",
+      "device_model": "WA850RE",
+      "firmware_version": "v2 1.0.0 P1 (2016-05-17; Rel.51198)",
+      "firmware_version_source": "v2 1.0.0 P1 (2016-05-17; Rel.51198)",
+      "known_bac_cves": [
+        "CVE-2025-14738"
+      ]
+    },
+    {
+      "image_id": 36,
+      "vendor": "TP-Link",
+      "device_model": "TL-WR940N",
+      "firmware_version": "v4 3.16.9 (2016-06-17)",
+      "firmware_version_source": "v4 3.16.9 (2016-06-17)",
+      "known_bac_cves": [
+        "CVE-2022-43636",
+        "CVE-2022-24972",
+        "CVE-2025-11676"
+      ]
+    },
+    {
+      "image_id": 37,
+      "vendor": "TRENDnet",
+      "device_model": "TEW-827DRU",
+      "firmware_version": "FW2.04B03",
+      "firmware_version_source": "FW2.04B03",
+      "known_bac_cves": [
+        "CVE-2021-20158"
+      ]
+    },
+    {
+      "image_id": 38,
+      "vendor": "TRENDnet",
+      "device_model": "TEW-811DRU",
+      "firmware_version": "v1.0.10.0",
+      "firmware_version_source": "v1.0.10.0",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 39,
+      "vendor": "Ubiquiti",
+      "device_model": "EdgeRouterX",
+      "firmware_version": "v2.0.9.5346345",
+      "firmware_version_source": "v2.0.9.5346345",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 40,
+      "vendor": "WAVLINK",
+      "device_model": "WN530H4",
+      "firmware_version": "20220721 (release build)",
+      "firmware_version_source": "20220721 (release identifier; version unspecified)",
+      "known_bac_cves": [
+        "CVE-2020-12124",
+        "CVE-2020-12127",
+        "CVE-2022-48165"
+      ]
+    },
+    {
+      "image_id": 41,
+      "vendor": "Zyxel",
+      "device_model": "WSQ50",
+      "firmware_version": "V2.20(ABKJ.4)C0",
+      "firmware_version_source": "V2.20(ABKJ.4)C0 [decoded]",
+      "known_bac_cves": []
+    },
+    {
+      "image_id": 42,
+      "vendor": "Zyxel",
+      "device_model": "NAS326",
+      "firmware_version": "V5.21(AAZF.9)C0",
+      "firmware_version_source": "V5.21(AAZF.9)C0 [decoded]",
+      "known_bac_cves": [
+        "CVE-2023-35138",
+        "CVE-2024-29972"
+      ]
+    }
+  ]
+}

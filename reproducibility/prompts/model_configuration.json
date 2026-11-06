@@ -1,0 +1,20 @@
+{
+  "model": "gpt-4.1",
+  "model_configuration_key": "OPENAI_MODEL",
+  "temperature": {
+    "explicit_override": false
+  },
+  "top_p": {
+    "explicit_override": false
+  },
+  "maximum_output_length": {
+    "explicit_override": false
+  },
+  "structured_classification_response": "JSON object",
+  "maximum_total_attempts_per_request": 3,
+  "retryable_failures": [
+    "API failure",
+    "invalid or incomplete structured response"
+  ],
+  "exhausted_retry_outcome": "unsuccessful/unresolved; not a positive decision"
+}
